@@ -1,0 +1,37 @@
+# ──────────────────────────────────────────────────────────────────
+# gateway.yaml — Main server and Odoo connection configuration
+# Copy to gateway.yaml and adjust for your environment.
+# ──────────────────────────────────────────────────────────────────
+
+server:
+  name: "odoo-mcp-gateway"
+  transport: stdio            # "stdio" or "streamable-http"
+  host: 127.0.0.1             # bind address for streamable-http
+  port: 8000                  # bind port for streamable-http
+  log_level: INFO             # DEBUG, INFO, WARNING, ERROR
+  max_concurrent_sessions: 100
+  session_timeout_seconds: 1800
+
+odoo:
+  # WARNING: Use HTTPS in production. Plain HTTP exposes credentials and
+  # session tokens to network eavesdropping. Only use HTTP for local dev.
+  url: "http://localhost:8069"
+  database: ""                # leave empty for single-db installs
+  version: auto               # auto-detect, or pin to 17, 18, 19
+  pool_size: 10               # HTTP connection pool size
+  circuit_breaker:
+    failure_threshold: 5      # consecutive failures before opening
+    recovery_timeout_seconds: 30
+  retry:
+    max_retries: 3
+    backoff_base_seconds: 1
+
+auth:
+  methods:
+    - api_key
+    - password
+  required_group: ""          # e.g. "base.group_user" to restrict
+
+rate_limit:
+  global_per_minute: 60
+  write_per_minute: 20

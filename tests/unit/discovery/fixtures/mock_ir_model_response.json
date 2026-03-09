@@ -1,0 +1,14 @@
+[
+    {"id": 1, "model": "res.partner", "name": "Contact", "transient": false, "state": "base", "modules": "base", "info": ""},
+    {"id": 2, "model": "sale.order", "name": "Sales Order", "transient": false, "state": "base", "modules": "sale", "info": "Quotations, sale orders"},
+    {"id": 3, "model": "purchase.order", "name": "Purchase Order", "transient": false, "state": "base", "modules": "purchase", "info": ""},
+    {"id": 4, "model": "hr.employee", "name": "Employee", "transient": false, "state": "base", "modules": "hr", "info": ""},
+    {"id": 5, "model": "project.task", "name": "Task", "transient": false, "state": "base", "modules": "project", "info": ""},
+    {"id": 6, "model": "custom.delivery.route", "name": "Delivery Route", "transient": false, "state": "base", "modules": "custom_delivery", "info": "Custom routes"},
+    {"id": 7, "model": "custom.delivery.stop", "name": "Delivery Stop", "transient": false, "state": "base", "modules": "custom_delivery", "info": ""},
+    {"id": 8, "model": "x_studio_warranty", "name": "Warranty", "transient": false, "state": "manual", "modules": "studio_customization", "info": ""},
+    {"id": 9, "model": "sale.advance.payment.inv", "name": "Sales Advance Payment Invoice", "transient": true, "state": "base", "modules": "sale", "info": ""},
+    {"id": 10, "model": "ir.config_parameter", "name": "System Parameter", "transient": false, "state": "base", "modules": "base", "info": ""},
+    {"id": 11, "model": "crm.lead", "name": "Lead/Opportunity", "transient": false, "state": "base", "modules": "crm", "info": ""},
+    {"id": 12, "model": "stock.picking", "name": "Transfer", "transient": false, "state": "base", "modules": "stock", "info": ""}
+]

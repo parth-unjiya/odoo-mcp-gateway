@@ -1,0 +1,53 @@
+# For development only. Set POSTGRES_PASSWORD in .env for production.
+services:
+  odoo-mcp-gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      - MCP_TRANSPORT=streamable-http
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8080
+      - ODOO_URL=http://odoo:8069
+      - CONFIG_DIR=/app/config
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      odoo:
+        condition: service_started
+    restart: unless-stopped
+
+  odoo:
+    image: odoo:18.0
+    environment:
+      - HOST=postgres
+      - USER=odoo
+      # For development only. Set POSTGRES_PASSWORD in .env for production.
+      - PASSWORD=${POSTGRES_PASSWORD:-changeme_dev_only}
+    volumes:
+      - odoo-data:/var/lib/odoo
+      - odoo-addons:/mnt/extra-addons
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=odoo
+      # For development only. Set POSTGRES_PASSWORD in .env for production.
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme_dev_only}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U odoo"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  odoo-data:
+  odoo-addons:
+  pg-data:

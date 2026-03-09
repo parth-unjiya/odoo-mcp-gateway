@@ -1,0 +1,15 @@
+default_policy: deny
+
+stock_models:
+  full_crud:
+    - res.partner
+    - sale.order
+  read_only:
+    - res.partner
+
+custom_models:
+  full_crud: []
+  read_only: []
+
+allowed_methods: {}
+sensitive_fields: {}

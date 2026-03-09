@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "odoo-mcp-gateway"
+version = "0.1.1"
+description = "Security-first, version-agnostic MCP gateway for Odoo 17/18/19 — works with stock and custom modules via YAML configuration"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Parth Unjiya", email = "parth.unjiya@spaceo.in" },
+]
+keywords = ["odoo", "mcp", "gateway", "erp", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "mcp>=1.9.4",
+    "httpx>=0.25.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "defusedxml>=0.7.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/parth-unjiya/odoo-mcp-gateway"
+Repository = "https://github.com/parth-unjiya/odoo-mcp-gateway"
+Issues = "https://github.com/parth-unjiya/odoo-mcp-gateway/issues"
+
+[project.scripts]
+odoo-mcp-gateway = "odoo_mcp_gateway.__main__:main"
+odoo-mcp-tools = "odoo_mcp_gateway.cli.tools:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "mypy>=1.0",
+    "types-pyyaml>=6.0",
+    "types-defusedxml>=0.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/odoo_mcp_gateway"]
+
+[tool.ruff]
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "S", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

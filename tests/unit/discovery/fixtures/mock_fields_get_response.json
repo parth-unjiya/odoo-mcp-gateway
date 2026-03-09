@@ -1,0 +1,16 @@
+{
+    "name": {"type": "char", "string": "Order Reference", "required": true, "readonly": false, "store": true, "help": ""},
+    "partner_id": {"type": "many2one", "string": "Customer", "required": true, "readonly": false, "store": true, "relation": "res.partner", "help": ""},
+    "state": {"type": "selection", "string": "Status", "required": false, "readonly": true, "store": true, "selection": [["draft", "Quotation"], ["sale", "Sales Order"], ["done", "Locked"], ["cancel", "Cancelled"]], "help": ""},
+    "date_order": {"type": "datetime", "string": "Order Date", "required": true, "readonly": false, "store": true, "help": ""},
+    "amount_total": {"type": "monetary", "string": "Total", "required": false, "readonly": true, "store": true, "help": ""},
+    "order_line": {"type": "one2many", "string": "Order Lines", "required": false, "readonly": false, "store": false, "relation": "sale.order.line", "help": ""},
+    "image_1920": {"type": "binary", "string": "Image", "required": false, "readonly": false, "store": true, "help": ""},
+    "__last_update": {"type": "datetime", "string": "Last Modified on", "required": false, "readonly": true, "store": false, "help": ""},
+    "user_id": {"type": "many2one", "string": "Salesperson", "required": false, "readonly": false, "store": true, "relation": "res.users", "help": ""},
+    "company_id": {"type": "many2one", "string": "Company", "required": true, "readonly": true, "store": true, "relation": "res.company", "help": ""},
+    "write_uid": {"type": "many2one", "string": "Last Updated by", "required": false, "readonly": true, "store": true, "relation": "res.users", "help": ""},
+    "create_date": {"type": "datetime", "string": "Created on", "required": false, "readonly": true, "store": true, "help": ""},
+    "display_name": {"type": "char", "string": "Display Name", "required": false, "readonly": true, "store": false, "help": ""},
+    "currency_id": {"type": "many2one", "string": "Currency", "required": true, "readonly": false, "store": true, "relation": "res.currency", "help": ""}
+}

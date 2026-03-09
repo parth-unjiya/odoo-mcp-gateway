@@ -1,0 +1,9 @@
+always_blocked:
+  - ir.config_parameter
+  - 123_invalid_model
+  - UPPERCASE.model
+
+admin_only: []
+admin_write_only: []
+blocked_methods: []
+blocked_write_fields: []

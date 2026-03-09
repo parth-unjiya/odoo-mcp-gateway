@@ -1,0 +1,32 @@
+tool_group_requirements:
+  delete_record:
+    - base.group_system
+  execute_method:
+    - base.group_system
+  update_record:
+    - base.group_user
+  create_record:
+    - base.group_user
+
+sensitive_fields:
+  hr.employee:
+    fields:
+      - wage
+      - salary
+      - ssnid
+    required_group: hr.group_hr_manager
+  res.users:
+    fields:
+      - password
+      - signup_token
+    required_group: base.group_system
+
+field_group_overrides:
+  account.move:
+    amount_total:
+      read: account.group_account_invoice
+      write: account.group_account_manager
+  sale.order:
+    margin:
+      read: sale.group_sale_manager
+      write: sale.group_sale_manager

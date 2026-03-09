@@ -1,0 +1,37 @@
+default_policy: deny
+
+stock_models:
+  full_crud:
+    - res.partner
+    - crm.lead
+    - sale.order
+    - product.product
+  read_only:
+    - res.company
+    - res.country
+    - res.currency
+  admin_only:
+    - res.users
+    - ir.model
+
+custom_models:
+  full_crud:
+    - x_custom.model
+  read_only:
+    - x_custom.report
+
+allowed_methods:
+  sale.order:
+    - action_confirm
+    - action_cancel
+  crm.lead:
+    - action_set_won
+    - action_set_lost
+
+sensitive_fields:
+  res.partner:
+    - vat
+    - bank_ids
+  hr.employee:
+    - wage
+    - salary

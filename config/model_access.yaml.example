@@ -1,0 +1,162 @@
+# ──────────────────────────────────────────────────────────────────
+# model_access.yaml — Declarative model allow-list
+# Controls which Odoo models and methods the gateway exposes.
+# Copy to model_access.yaml and customise for your deployment.
+# ──────────────────────────────────────────────────────────────────
+
+# Default policy when a model is not listed below.
+# "deny"  = only explicitly listed models are accessible (recommended)
+# "allow" = all models accessible unless explicitly blocked
+default_policy: deny
+
+# ── Stock Odoo models ────────────────────────────────────────────
+
+stock_models:
+  # Full CRUD access (search, read, create, write, unlink)
+  full_crud:
+    - res.partner
+    - res.partner.bank
+    - crm.lead
+    - crm.team
+    - sale.order
+    - sale.order.line
+    - purchase.order
+    - purchase.order.line
+    - account.move
+    - account.move.line
+    - account.payment
+    - stock.picking
+    - stock.move
+    - stock.move.line
+    - stock.warehouse
+    - stock.location
+    - product.template
+    - product.product
+    - product.category
+    - product.pricelist
+    - product.pricelist.item
+    - project.project
+    - project.task
+    - hr.employee
+    - hr.department
+    - hr.leave
+    - hr.leave.type
+    - mail.message
+    - mail.activity
+    - mail.activity.type
+    - calendar.event
+    - calendar.attendee
+
+  # Read-only access (search_read, read, fields_get only)
+  read_only:
+    - res.company
+    - res.country
+    - res.country.state
+    - res.currency
+    - res.bank
+    - res.partner.category
+    - res.partner.title
+    - uom.uom
+    - uom.category
+    - account.account
+    - account.tax
+    - account.journal
+    - account.fiscal.position
+    - account.payment.term
+    - stock.warehouse.orderpoint
+    - product.supplierinfo
+    - hr.job
+    - hr.work.location
+
+  # Admin-only access (requires base.group_system)
+  admin_only:
+    - res.users
+    - res.groups
+    - ir.model
+    - ir.model.fields
+    - ir.model.data
+
+# ── Custom models ────────────────────────────────────────────────
+# Add your custom module models here.
+#
+# Examples:
+#   custom_models:
+#     full_crud:
+#       - x_my_custom.model
+#       - x_studio_project.phase
+#     read_only:
+#       - x_custom.report_view
+custom_models:
+  full_crud: []
+  read_only: []
+
+# ── Allowed methods ──────────────────────────────────────────────
+# Methods that may be called via execute_method, per model.
+# Only listed methods are allowed; everything else is denied.
+allowed_methods:
+  sale.order:
+    - action_confirm
+    - action_cancel
+    - action_draft
+    - action_quotation_send
+    - action_done
+    - _compute_amount
+
+  purchase.order:
+    - button_confirm
+    - button_cancel
+    - button_draft
+    - button_approve
+    - action_create_invoice
+
+  stock.picking:
+    - action_confirm
+    - action_assign
+    - button_validate
+    - action_cancel
+    - do_unreserve
+
+  account.move:
+    - action_post
+    - button_draft
+    - button_cancel
+    - action_register_payment
+    - action_reverse
+
+  crm.lead:
+    - action_set_won
+    - action_set_lost
+    - action_set_active
+    - action_archive
+    - convert_opportunity
+
+  hr.leave:
+    - action_approve
+    - action_refuse
+    - action_draft
+    - action_confirm
+    - action_validate
+
+  project.task:
+    - action_assign_to_me
+    - action_open_task_form
+
+# ── Sensitive fields ─────────────────────────────────────────────
+# Fields that are always stripped from responses for non-admin users.
+# For finer-grained control, see rbac.yaml → sensitive_fields.
+sensitive_fields:
+  res.partner:
+    - vat
+    - bank_ids
+    - credit_limit
+  hr.employee:
+    - wage
+    - salary
+    - ssnid
+    - identification_id
+    - bank_account_id
+    - private_email
+    - private_phone
+  account.move:
+    - amount_total_signed
+    - amount_residual_signed

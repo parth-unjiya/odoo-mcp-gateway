@@ -1,0 +1,49 @@
+# ── Environment ──────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# ── Virtual environments ────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Tools ────────────────────────────────────────────────────────
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ── IDE ──────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Local-only planning & AI session files ───────────────────────
+CLAUDE.md
+DEVELOPMENT_PLAN.md
+PAIN_POINTS_AND_PLAN.md
+odoo_mcp_servers_analysis.md
+v*_test_report.md
+V2_ROADMAP.md
+.claude-flow/
+.claude/

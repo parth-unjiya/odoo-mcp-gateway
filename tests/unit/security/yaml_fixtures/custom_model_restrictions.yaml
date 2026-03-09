@@ -1,0 +1,14 @@
+always_blocked:
+  - ir.config_parameter
+
+admin_only:
+  - x_custom.admin_model
+
+admin_write_only:
+  - x_custom.readonly_for_users
+
+blocked_methods:
+  - sudo
+
+blocked_write_fields:
+  - password

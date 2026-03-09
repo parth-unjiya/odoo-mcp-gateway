@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────────────────────────────
+# rbac.yaml — Role-based access control overlays
+# Maps MCP tool operations to required Odoo groups.
+# Copy to rbac.yaml and customise for your deployment.
+# ──────────────────────────────────────────────────────────────────
+
+# Which Odoo groups are required to call specific MCP tools.
+# Users without the listed group will get a permission-denied error.
+tool_group_requirements:
+  delete_record:
+    - base.group_system                  # only admins can delete
+  execute_method:
+    - base.group_system                  # arbitrary method calls = admin
+  update_record:
+    - base.group_user                    # any internal user
+  create_record:
+    - base.group_user
+
+# Fields that are redacted (replaced with "***") for users who lack
+# the specified group.  This runs AFTER Odoo's own field ACLs.
+sensitive_fields:
+  hr.employee:
+    fields:
+      - wage
+      - salary
+      - ssnid
+      - bank_account_id
+      - private_email
+      - private_phone
+      - identification_id
+    required_group: hr.group_hr_manager
+
+  res.users:
+    fields:
+      - password
+      - signup_token
+      - groups_id
+    required_group: base.group_system
+
+# Per-model field-level group overrides.  Even if a user can read the
+# model, these fields require the specified group to be visible.
+field_group_overrides:
+  account.move:
+    amount_total:
+      read: account.group_account_invoice
+      write: account.group_account_manager
+    amount_residual:
+      read: account.group_account_invoice
+      write: account.group_account_manager
+
+  sale.order:
+    margin:
+      read: sale.group_sale_manager
+      write: sale.group_sale_manager
+
+  purchase.order:
+    amount_total:
+      read: purchase.group_purchase_user
+      write: purchase.group_purchase_manager
+
+  hr.employee:
+    wage:
+      read: hr.group_hr_manager
+      write: hr.group_hr_manager
+    salary:
+      read: hr.group_hr_manager
+      write: hr.group_hr_manager

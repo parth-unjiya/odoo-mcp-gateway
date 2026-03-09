@@ -1,0 +1,9 @@
+always_blocked:
+  - ${BLOCKED_MODEL}
+
+admin_only:
+  - ${ADMIN_MODEL}
+
+admin_write_only: []
+blocked_methods: []
+blocked_write_fields: []

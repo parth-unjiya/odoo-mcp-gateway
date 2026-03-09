@@ -1,0 +1,128 @@
+# ──────────────────────────────────────────────────────────────────
+# restrictions.yaml — Hard-coded safety guardrails
+# These restrictions are enforced BEFORE Odoo's own access rules.
+# Copy to restrictions.yaml and customise for your deployment.
+# ──────────────────────────────────────────────────────────────────
+
+# Models that are NEVER exposed through the gateway, regardless of
+# user role.  These typically contain security-critical internals.
+always_blocked:
+  - ir.config_parameter
+  - res.users.apikeys
+  - ir.cron
+  - ir.module.module
+  - ir.module.module.dependency
+  - ir.module.module.exclusion
+  - ir.model.access
+  - ir.rule
+  - ir.translation
+  - ir.logging
+  - ir.mail_server
+  - ir.actions.server
+  - ir.actions.act_window
+  - ir.actions.act_url
+  - ir.actions.report.xml
+  - ir.actions.client
+  - ir.ui.view
+  - ir.ui.menu
+  - ir.property
+  - ir.sequence
+  - ir.attachment          # direct binary access — use dedicated endpoint
+  - base.language.install
+  - base.module.update
+  - base.module.upgrade
+  - base.module.uninstall
+  - base.setup.installer
+  - bus.bus
+  - bus.presence
+  - publisher_warranty.contract
+  - fetchmail.server
+  - base.import.mapping
+  - base.import.tests.models.char
+  - change.password.wizard
+  - change.password.user
+  - res.config
+  - res.config.installer
+  - res.config.settings
+  - base_setup.config
+
+# Models accessible only to users in base.group_system (Odoo admin).
+admin_only:
+  - res.users
+  - res.groups
+  - ir.model
+  - ir.model.fields
+  - ir.model.data
+  - ir.filters
+  - ir.exports
+  - ir.exports.line
+  - ir.default
+  - ir.model.constraint
+  - ir.model.relation
+  - audit.log
+  - base.language.export
+  - base.language.import
+  - base.update.translations
+  - decimal.precision
+  - ir.actions.todo
+  - ir.model.fields.selection
+  - ir.server.object.lines
+  - res.lang
+
+# Models where non-admin users have read-only access; writes require
+# base.group_system.
+admin_write_only:
+  - res.company
+  - res.country
+  - res.country.state
+  - res.country.group
+  - res.currency
+  - res.currency.rate
+  - res.bank
+  - res.partner.bank
+  - res.partner.category
+  - res.partner.title
+  - uom.uom
+  - uom.category
+  - account.account
+  - account.tax
+  - account.journal
+
+# Methods that are never callable via execute_method, even on
+# allowed models.
+blocked_methods:
+  - unlink_acl              # internal cleanup
+  - _compute_access         # internal compute
+  - _check_access_rights    # security internals
+  - _check_access_rule
+  - _check_company
+  - write_on_security_fields
+  - sudo
+  - with_user
+  - with_company
+  - with_context
+  - with_env
+  - _register_hook
+  - _setup_base
+  - _setup_fields
+  - _setup_complete
+  - _auto_init
+  - init
+  - _table_query
+  - _parent_store_compute
+  - _sql
+  - _read_group_raw
+
+# Fields that are never writable through the gateway, even for admin.
+# Prevents accidental privilege escalation via direct field writes.
+blocked_write_fields:
+  - password
+  - password_crypt
+  - signup_token
+  - signup_type
+  - signup_expiration
+  - groups_id
+  - share
+  - api_key
+  - totp_secret
+  - active

@@ -1,0 +1,31 @@
+default_policy: deny
+stock_models:
+  full_crud:
+    - res.partner
+    - sale.order
+    - crm.lead
+    - hr.employee
+    - project.task
+    - purchase.order
+  read_only:
+    - res.company
+    - res.country
+  admin_only:
+    - ir.model
+custom_models:
+  full_crud:
+    - custom.delivery.route
+    - custom.delivery.stop
+  read_only:
+    - x_studio_warranty
+allowed_methods:
+  sale.order:
+    - action_confirm
+    - action_cancel
+  custom.delivery.route:
+    - action_dispatch
+    - action_complete
+sensitive_fields:
+  hr.employee:
+    - wage
+    - salary
