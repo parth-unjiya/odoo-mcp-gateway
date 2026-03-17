@@ -12,6 +12,7 @@ from odoo_mcp_gateway.client.exceptions import OdooConnectionError
 from odoo_mcp_gateway.core.connection.manager import (
     CircuitState,
     ConnectionManager,
+    HealthStatus,
 )
 
 _BACKOFF_PATH = "odoo_mcp_gateway.core.connection.manager.ConnectionManager._backoff"
@@ -372,3 +373,87 @@ class TestCircuitStateEnum:
         assert CircuitState.CLOSED.value == "closed"
         assert CircuitState.OPEN.value == "open"
         assert CircuitState.HALF_OPEN.value == "half_open"
+
+
+# ------------------------------------------------------------------
+# Health status
+# ------------------------------------------------------------------
+
+
+class TestHealthStatus:
+    def test_healthy_status(self) -> None:
+        mgr = ConnectionManager("http://odoo:8069", failure_threshold=5)
+        status = mgr.get_health_status()
+        assert isinstance(status, HealthStatus)
+        assert status.circuit_state == "closed"
+        assert status.failure_count == 0
+        assert status.failure_threshold == 5
+        assert status.seconds_until_recovery == 0.0
+        assert status.base_url == "http://odoo:8069"
+
+    async def test_status_after_failures(self) -> None:
+        mgr = ConnectionManager(
+            "http://odoo:8069",
+            failure_threshold=3,
+            max_retries=0,
+        )
+        mgr._client = AsyncMock(spec=httpx.AsyncClient)
+        mgr._client.request = AsyncMock(side_effect=httpx.ConnectError("fail"))
+        mgr._client.aclose = AsyncMock()
+
+        for _ in range(3):
+            with pytest.raises(OdooConnectionError):
+                await mgr.request("POST", "/test")
+
+        status = mgr.get_health_status()
+        assert status.circuit_state == "open"
+        assert status.failure_count == 3
+
+    def test_status_open_shows_recovery_time(self) -> None:
+        mgr = ConnectionManager(
+            "http://odoo:8069",
+            failure_threshold=1,
+            recovery_timeout=30.0,
+        )
+        mgr._state = CircuitState.OPEN
+        mgr._failure_count = 1
+        mgr._last_failure_time = time.monotonic()
+
+        status = mgr.get_health_status()
+        assert status.circuit_state == "open"
+        assert status.seconds_until_recovery > 0.0
+        assert status.seconds_until_recovery <= 30.0
+
+    def test_status_half_open_recovery_zero(self) -> None:
+        mgr = ConnectionManager(
+            "http://odoo:8069",
+            failure_threshold=1,
+            recovery_timeout=0.0,
+        )
+        mgr._state = CircuitState.OPEN
+        mgr._last_failure_time = time.monotonic() - 1.0
+
+        status = mgr.get_health_status()
+        assert status.circuit_state == "half_open"
+        assert status.seconds_until_recovery == 0.0
+
+    def test_health_status_is_frozen(self) -> None:
+        mgr = ConnectionManager("http://odoo:8069")
+        status = mgr.get_health_status()
+        with pytest.raises(AttributeError):
+            status.circuit_state = "open"  # type: ignore[misc]
+
+
+# ------------------------------------------------------------------
+# Properties
+# ------------------------------------------------------------------
+
+
+class TestProperties:
+    def test_base_url(self) -> None:
+        mgr = ConnectionManager("http://odoo:8069/")
+        assert mgr.base_url == "http://odoo:8069"
+
+    def test_client_property(self) -> None:
+        mgr = ConnectionManager("http://odoo:8069")
+        assert isinstance(mgr.client, httpx.AsyncClient)

@@ -1,3 +1,10 @@
+# ============================================================
+# REFERENCE ONLY — This file is NOT loaded by the application.
+# All settings below are configured via environment variables
+# or .env file. See .env.example for the actual configuration.
+# This file documents available settings and their defaults.
+# ============================================================
+
 # ──────────────────────────────────────────────────────────────────
 # gateway.yaml — Main server and Odoo connection configuration
 # Copy to gateway.yaml and adjust for your environment.

@@ -39,8 +39,11 @@ stock_models:
     - project.task
     - hr.employee
     - hr.department
+    - hr.attendance
     - hr.leave
     - hr.leave.type
+    - helpdesk.ticket
+    - helpdesk.team
     - mail.message
     - mail.activity
     - mail.activity.type

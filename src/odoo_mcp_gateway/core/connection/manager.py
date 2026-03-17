@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -12,6 +13,32 @@ import httpx
 from odoo_mcp_gateway.client.exceptions import OdooConnectionError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class HealthStatus:
+    """Snapshot of the connection manager's health state.
+
+    Attributes
+    ----------
+    circuit_state:
+        Current circuit breaker state (``closed``, ``open``, ``half_open``).
+    failure_count:
+        Number of consecutive failures recorded.
+    failure_threshold:
+        The configured threshold before the circuit opens.
+    seconds_until_recovery:
+        Seconds remaining before the circuit moves from OPEN to HALF_OPEN.
+        ``0.0`` when the circuit is not OPEN.
+    base_url:
+        The Odoo base URL this manager connects to.
+    """
+
+    circuit_state: str
+    failure_count: int
+    failure_threshold: int
+    seconds_until_recovery: float
+    base_url: str
 
 
 class CircuitState(Enum):
@@ -149,6 +176,41 @@ class ConnectionManager:
         raise OdooConnectionError(
             f"Request failed after {self._max_retries + 1} attempts: {last_exc}"
         ) from last_exc
+
+    def get_health_status(self) -> HealthStatus:
+        """Return a snapshot of the circuit breaker and connection health.
+
+        This method is synchronous and does not make any network calls.
+        """
+        current = self.state
+        seconds_until_recovery = 0.0
+        if self._state == CircuitState.OPEN:
+            elapsed = time.monotonic() - self._last_failure_time
+            remaining = self._recovery_timeout - elapsed
+            seconds_until_recovery = max(0.0, remaining)
+
+        return HealthStatus(
+            circuit_state=current.value,
+            failure_count=self._failure_count,
+            failure_threshold=self._failure_threshold,
+            seconds_until_recovery=round(seconds_until_recovery, 2),
+            base_url=self._base_url,
+        )
+
+    @property
+    def base_url(self) -> str:
+        """The Odoo base URL this manager connects to."""
+        return self._base_url
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """The underlying ``httpx.AsyncClient``.
+
+        Prefer :meth:`request` for circuit-breaker-wrapped calls.
+        Direct access is provided for cases where callers need to
+        configure session cookies or custom auth.
+        """
+        return self._client
 
     async def health_check(self) -> bool:
         """Probe Odoo for connectivity.

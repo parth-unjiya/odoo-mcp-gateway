@@ -17,7 +17,7 @@ Existing Odoo MCP servers share common problems: hardcoded model lists that miss
 - **Custom module support** — auto-discovers models via `ir.model`, add YAML config and it works
 - **Version-agnostic** — Odoo 17, 18, 19 with version-specific adapters
 - **Zero Odoo-side code** — `pip install` + YAML config = done. No custom addon required
-- **Full MCP primitives** — 27 Tools + 5 Resources + 7 Prompts (most servers only implement Tools)
+- **Full MCP primitives** — 29 Tools + 6 Resources + 12 Prompts (most servers only implement Tools)
 - **Plugin architecture** — extend with pip-installable domain packs via entry_points
 
 ## Architecture
@@ -32,9 +32,9 @@ MCP Server (FastMCP)
     |-- restrictions       --> Model/method/field block lists (YAML + hardcoded)
     |-- rbac               --> Field-level filtering + write sanitization
     |
-    |-- tools/             --> 27 MCP tools (auth + schema + CRUD + plugins)
-    |-- resources/         --> 5 MCP resources (odoo:// URIs)
-    |-- prompts/           --> 7 reusable prompt templates
+    |-- tools/             --> 29 MCP tools (auth + schema + CRUD + workflow + plugins)
+    |-- resources/         --> 6 MCP resources (odoo:// URIs)
+    |-- prompts/           --> 12 reusable prompt templates
     |-- plugins/           --> Entry-point plugin system (HR, Sales, Project, Helpdesk)
     |
     |  JSON-RPC / XML-RPC as authenticated user
@@ -164,7 +164,7 @@ Three stock Odoo auth methods — no custom addon needed:
 > login(method="password", username="admin", credential="admin", database="mydb")
 ```
 
-## MCP Tools (11)
+## Core MCP Tools (11)
 
 | Tool | Description |
 |------|-------------|
@@ -180,7 +180,14 @@ Three stock Odoo auth methods — no custom addon needed:
 | `read_group` | Aggregated grouped reads with aggregate functions |
 | `execute_method` | Call allowed model methods (validates method name) |
 
-## MCP Resources (5)
+## Workflow Tools (2)
+
+| Tool | Description |
+|------|-------------|
+| `get_create_requirements` | Get required fields and validation rules before creating a record |
+| `get_record_actions` | Get available workflow actions for an existing record |
+
+## MCP Resources (6)
 
 | URI | Description |
 |-----|-------------|
@@ -189,8 +196,9 @@ Three stock Odoo auth methods — no custom addon needed:
 | `odoo://record/{model}/{id}` | Single record data with RBAC field filtering |
 | `odoo://schema/{model}` | Field schema with type info and importance ranking |
 | `odoo://categories` | Model categories with counts |
+| `odoo://workflow/{model}` | Workflow definition with stages and actions for a model |
 
-## MCP Prompts (7)
+## MCP Prompts (12)
 
 | Prompt | Description |
 |--------|-------------|
@@ -201,6 +209,11 @@ Three stock Odoo auth methods — no custom addon needed:
 | `generate_report` | Analytical report generation |
 | `discover_custom_modules` | Find and understand custom modules |
 | `debug_access` | Troubleshoot access and permission issues |
+| `workflow_guide` | Step-by-step workflow execution guide for a model |
+| `record_creation_guide` | Guided record creation with field validation |
+| `bulk_operations` | Guide for performing bulk operations safely |
+| `field_mapping` | Map fields between Odoo versions (v17/v18/v19) |
+| `data_migration` | Guide for migrating data between models or versions |
 
 ## Built-in Domain Plugins
 
@@ -430,7 +443,7 @@ src/odoo_mcp_gateway/
 
 ## Testing
 
-1,043 tests across all layers with 93% code coverage:
+1,100+ tests across all layers with 93% code coverage:
 
 ```
 tests/unit/
@@ -473,9 +486,7 @@ All error messages are sanitized before reaching the MCP client — internal URL
 
 ## Known Limitations
 
-- **Single-user stdio mode**: The gateway is designed for single-user `stdio` transport (Claude Desktop, Claude Code). Multi-user `streamable-http` mode works but sessions are not fully isolated between concurrent users.
 - **XML-RPC credential handling**: When using API key authentication (XML-RPC), the credential is sent with every RPC call as required by the protocol. Use HTTPS in production.
-- **Admin detection**: Admin status is derived from Odoo group membership. Non-English Odoo instances may need configuration adjustments for group name resolution.
 
 ## Contributing
 

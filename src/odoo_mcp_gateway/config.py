@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # ── MCP transport ────────────────────────────────────────────────
     mcp_transport: Literal["stdio", "streamable-http"] = "stdio"
     mcp_host: str = "127.0.0.1"
-    mcp_port: int = 8000
+    mcp_port: int = 8080
     mcp_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     # ── YAML config directory ────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Any
 
@@ -23,6 +24,14 @@ from odoo_mcp_gateway.core.security.restrictions import RestrictionChecker
 from odoo_mcp_gateway.core.security.sanitizer import ErrorSanitizer
 
 logger = logging.getLogger(__name__)
+
+# ContextVar for per-request session isolation in HTTP mode.
+# Each MCP tool handler sets this to the current session's key
+# so that _get_client / _get_auth_manager can retrieve the
+# correct AuthManager from the gateway's auth_managers dict.
+_current_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_current_session_key", default=None
+)
 
 
 class GatewayContext:
@@ -89,18 +98,45 @@ class GatewayContext:
         return self.error_sanitizer.sanitize_exception(exc)
 
 
+def set_current_session_key(key: str | None) -> None:
+    """Set the current session key for the active request context."""
+    _current_session_key.set(key)
+
+
+def get_current_session_key() -> str | None:
+    """Get the current session key from the active request context."""
+    return _current_session_key.get(None)
+
+
 def _get_client(gateway: GatewayContext) -> Any:
-    """Get the active authenticated Odoo client."""
+    """Get the active authenticated Odoo client.
+
+    In HTTP mode, uses the ``_current_session_key`` context variable
+    to locate the correct session. Falls back to picking the first
+    available session (single-user stdio mode).
+    """
     if not gateway.auth_managers:
         raise ValueError("Not authenticated. Please call the login tool first.")
+    session_key = _current_session_key.get(None)
+    if session_key is not None and session_key in gateway.auth_managers:
+        return gateway.auth_managers[session_key].get_active_client()
+    # Fallback for stdio (single session) or when session key is not set
     auth_mgr = next(iter(gateway.auth_managers.values()))
     return auth_mgr.get_active_client()
 
 
 def _get_auth_manager(gateway: GatewayContext) -> AuthManager:
-    """Get the active AuthManager."""
+    """Get the active AuthManager.
+
+    In HTTP mode, uses the ``_current_session_key`` context variable
+    to locate the correct session. Falls back to picking the first
+    available session (single-user stdio mode).
+    """
     if not gateway.auth_managers:
         raise ValueError("Not authenticated. Please call the login tool first.")
+    session_key = _current_session_key.get(None)
+    if session_key is not None and session_key in gateway.auth_managers:
+        return gateway.auth_managers[session_key]
     return next(iter(gateway.auth_managers.values()))
 
 
@@ -133,6 +169,21 @@ def create_server(settings: Settings) -> FastMCP:
 
     register_resources(server, _get_context)
     register_prompts(server, _get_context)
+
+    # Load and register workflow tools (if available)
+    try:
+        from odoo_mcp_gateway.core.workflow.registry import WorkflowRegistry
+        from odoo_mcp_gateway.tools.workflow import register_workflow_tools
+
+        workflow_registry = WorkflowRegistry()
+        workflow_registry.load_stock_workflows()
+        gateway.workflow_registry = workflow_registry  # type: ignore[attr-defined]
+        register_workflow_tools(server, gateway, workflow_registry)
+        logger.info("Workflow tools registered")
+    except ImportError:
+        logger.debug("Workflow module not available, skipping workflow tools")
+    except Exception:
+        logger.warning("Failed to load workflow tools", exc_info=True)
 
     # Discover and activate plugins
     from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin

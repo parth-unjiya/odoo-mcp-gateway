@@ -16,22 +16,21 @@ from .sanitizer import ErrorSanitizer
 
 _log = logging.getLogger(__name__)
 
-# Operations that count as writes for rate limiting
-_WRITE_TOOLS = frozenset(
-    {
-        "create_record",
-        "update_record",
-        "delete_record",
-        "execute_method",
-        "check_in",
-        "check_out",
-        "request_leave",
-        "confirm_order",
-        "create_ticket",
-        "update_task_stage",
-        "update_ticket_stage",
-    }
-)
+# Operations that count as writes for rate limiting.
+# Mutable set so plugins can register additional write tools.
+_WRITE_TOOLS: set[str] = {
+    "create_record",
+    "update_record",
+    "delete_record",
+    "execute_method",
+    "check_in",
+    "check_out",
+    "request_leave",
+    "confirm_order",
+    "create_ticket",
+    "update_task_stage",
+    "update_ticket_stage",
+}
 
 # Map tool names to operation types
 _TOOL_OPERATION_MAP: dict[str, str] = {
@@ -63,6 +62,47 @@ _TOOL_OPERATION_MAP: dict[str, str] = {
     "create_ticket": "create",
     "update_ticket_stage": "write",
 }
+
+
+_VALID_OPERATIONS = frozenset({"read", "write", "create", "delete", "auth"})
+
+
+def register_tool_operation(tool_name: str, operation: str) -> None:
+    """Register a single tool's operation type.
+
+    Parameters
+    ----------
+    tool_name:
+        Name of the tool (e.g. ``"my_plugin_tool"``).
+    operation:
+        Operation type: ``"read"``, ``"write"``, ``"create"``, ``"delete"``,
+        or ``"auth"``.
+
+    Raises
+    ------
+    ValueError
+        If *operation* is not one of the valid operation types.
+    """
+    if operation not in _VALID_OPERATIONS:
+        raise ValueError(
+            f"Invalid operation {operation!r}. "
+            f"Must be one of: {', '.join(sorted(_VALID_OPERATIONS))}"
+        )
+    _TOOL_OPERATION_MAP[tool_name] = operation
+    if operation in ("write", "create", "delete"):
+        _WRITE_TOOLS.add(tool_name)
+
+
+def register_tool_operations(mapping: dict[str, str]) -> None:
+    """Bulk-register tool operation types.
+
+    Parameters
+    ----------
+    mapping:
+        Dict of ``{tool_name: operation}``.
+    """
+    for tool_name, operation in mapping.items():
+        register_tool_operation(tool_name, operation)
 
 
 class SecurityError(Exception):

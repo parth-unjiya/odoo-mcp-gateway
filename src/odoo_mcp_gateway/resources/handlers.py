@@ -252,6 +252,41 @@ def register_resources(server: FastMCP, get_context: Any) -> None:
             indent=2,
         )
 
+    @server.resource("odoo://workflow/{model_name}")
+    async def workflow_resource(model_name: str) -> str:
+        """Get the workflow definition for an Odoo model.
+
+        Returns JSON object with state machine (states + transitions),
+        creation guide, and version-specific notes. Useful for AI agents
+        to understand what actions are available at each stage.
+        """
+        ctx = get_context()
+        gate_err = await _resource_gate(ctx, "workflow")
+        if gate_err:
+            return json.dumps({"error": gate_err})
+        try:
+            model_name = _validate_model_name(model_name)
+        except ValueError:
+            return json.dumps({"error": "Invalid model name"})
+
+        if not hasattr(ctx, "workflow_registry"):
+            return json.dumps(
+                {"error": "Workflow engine not available"}
+            )
+
+        wf_dict = ctx.workflow_registry.to_dict(model_name)
+        if wf_dict is None:
+            return json.dumps(
+                {
+                    "error": (
+                        f"No workflow definition found for '{model_name}'. "
+                        "Use get_model_fields to inspect the state field "
+                        "manually."
+                    ),
+                }
+            )
+        return json.dumps(wf_dict, indent=2)
+
     @server.resource("odoo://categories")
     async def categories_resource() -> str:
         """List available model categories with counts.

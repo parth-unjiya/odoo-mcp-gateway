@@ -678,3 +678,370 @@ async def test_record_resource_rbac_filters_fields() -> None:
     assert data["id"] == 1
     assert data["name"] == "Alice"
     assert data["secret"] == "***"
+
+
+# ------------------------------------------------------------------
+# record_resource error paths
+# ------------------------------------------------------------------
+
+
+async def test_record_resource_negative_id() -> None:
+    """record_resource rejects record ID <= 0."""
+    ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+    handlers = _register(ctx)
+    raw = await handlers["odoo://record/{model_name}/{record_id}"](
+        model_name="res.partner", record_id="0"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "positive" in data["error"].lower()
+
+
+async def test_record_resource_negative_record_id() -> None:
+    """record_resource rejects negative record IDs."""
+    ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+    handlers = _register(ctx)
+    raw = await handlers["odoo://record/{model_name}/{record_id}"](
+        model_name="res.partner", record_id="-5"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "positive" in data["error"].lower()
+
+
+async def test_record_resource_execute_kw_exception() -> None:
+    """record_resource returns error when execute_kw raises."""
+    mock_client = AsyncMock()
+    mock_client.execute_kw.side_effect = RuntimeError("Connection lost")
+    ctx = _FakeContext(auth_mgr=_make_auth_mgr(client=mock_client))
+    handlers = _register(ctx)
+    raw = await handlers["odoo://record/{model_name}/{record_id}"](
+        model_name="res.partner", record_id="1"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Failed to read record" in data["error"]
+    assert "RuntimeError" in data["error"]
+
+
+async def test_record_resource_invalid_model_name() -> None:
+    """record_resource rejects invalid model names."""
+    ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+    handlers = _register(ctx)
+    raw = await handlers["odoo://record/{model_name}/{record_id}"](
+        model_name="123-invalid!", record_id="1"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Invalid model name" in data["error"]
+
+
+async def test_record_resource_model_restricted() -> None:
+    """record_resource returns error for restricted model access."""
+    ctx = _FakeContext(
+        auth_mgr=_make_auth_mgr(),
+        restrictions=_BlockingRestrictions("res.users"),
+    )
+    handlers = _register(ctx)
+    raw = await handlers["odoo://record/{model_name}/{record_id}"](
+        model_name="res.users", record_id="1"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "not accessible" in data["error"]
+
+
+# ------------------------------------------------------------------
+# schema_resource error paths
+# ------------------------------------------------------------------
+
+
+async def test_schema_resource_invalid_model_name() -> None:
+    """schema_resource rejects invalid model names."""
+    ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+    handlers = _register(ctx)
+    raw = await handlers["odoo://schema/{model_name}"](
+        model_name="INVALID MODEL!"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Invalid model name" in data["error"]
+
+
+async def test_schema_resource_without_auth() -> None:
+    """schema_resource returns error when not authenticated."""
+    ctx = _FakeContext()
+    handlers = _register(ctx)
+    raw = await handlers["odoo://schema/{model_name}"](
+        model_name="res.partner"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Not authenticated" in data["error"]
+
+
+async def test_schema_resource_with_selection_and_help() -> None:
+    """schema_resource includes selection options and help text."""
+    inspector = FieldInspector()
+    inspector._cache["res.partner"] = (
+        999999999.0,
+        {
+            "type": FieldInfo(
+                name="type",
+                field_type="selection",
+                string="Type",
+                required=False,
+                selection=[("contact", "Contact"), ("invoice", "Invoice")],
+                help_text="Address type",
+            ),
+        },
+    )
+    ctx = _FakeContext(
+        auth_mgr=_make_auth_mgr(),
+        field_inspector=inspector,
+    )
+    handlers = _register(ctx)
+    raw = await handlers["odoo://schema/{model_name}"](model_name="res.partner")
+    data = json.loads(raw)
+    assert "type" in data["fields"]
+    assert data["fields"]["type"]["options"] == [
+        ["contact", "Contact"],
+        ["invoice", "Invoice"],
+    ]
+    assert data["fields"]["type"]["help"] == "Address type"
+
+
+async def test_schema_resource_rbac_hides_fields() -> None:
+    """schema_resource applies RBAC to hide sensitive fields."""
+    inspector = FieldInspector()
+    inspector._cache["res.partner"] = (
+        999999999.0,
+        {
+            "name": FieldInfo(
+                name="name",
+                field_type="char",
+                string="Name",
+                required=True,
+            ),
+            "credit_limit": FieldInfo(
+                name="credit_limit",
+                field_type="float",
+                string="Credit Limit",
+                required=False,
+            ),
+        },
+    )
+    rbac = _FieldHidingRBAC(hidden_fields={"credit_limit"})
+    ctx = _FakeContext(
+        auth_mgr=_make_auth_mgr(),
+        field_inspector=inspector,
+        rbac=rbac,
+    )
+    handlers = _register(ctx)
+    raw = await handlers["odoo://schema/{model_name}"](model_name="res.partner")
+    data = json.loads(raw)
+    assert "name" in data["fields"]
+    assert "credit_limit" not in data["fields"]
+
+
+# ------------------------------------------------------------------
+# model_detail_resource error paths
+# ------------------------------------------------------------------
+
+
+async def test_model_detail_invalid_model_name() -> None:
+    """model_detail_resource rejects invalid model names."""
+    ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+    handlers = _register(ctx)
+    raw = await handlers["odoo://models/{model_name}"](
+        model_name="DROP TABLE users"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Invalid model name" in data["error"]
+
+
+async def test_model_detail_binary_fields_excluded() -> None:
+    """model_detail_resource excludes binary fields from the response."""
+    inspector = FieldInspector()
+    inspector._cache["res.partner"] = (
+        999999999.0,
+        {
+            "name": FieldInfo(
+                name="name",
+                field_type="char",
+                string="Name",
+                required=True,
+            ),
+            "image_1920": FieldInfo(
+                name="image_1920",
+                field_type="binary",
+                string="Image",
+                required=False,
+                is_binary=True,
+            ),
+        },
+    )
+    ctx = _FakeContext(
+        models={"res.partner": _model("res.partner", "Contact")},
+        auth_mgr=_make_auth_mgr(),
+        field_inspector=inspector,
+    )
+    handlers = _register(ctx)
+    raw = await handlers["odoo://models/{model_name}"](model_name="res.partner")
+    data = json.loads(raw)
+    assert "name" in data["fields"]
+    assert "image_1920" not in data["fields"]
+
+
+# ------------------------------------------------------------------
+# list_models_resource error paths
+# ------------------------------------------------------------------
+
+
+async def test_list_models_resource_exception() -> None:
+    """list_models_resource returns error JSON when get_context raises."""
+
+    def bad_context():
+        raise RuntimeError("Context init failed")
+
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP(name="test")
+    captured: dict[str, Any] = {}
+    original_resource = server.resource
+
+    def capturing_resource(uri: str, **kwargs: Any):
+        decorator = original_resource(uri, **kwargs)
+
+        def wrapper(fn: Any) -> Any:
+            result = decorator(fn)
+            captured[uri] = fn
+            return result
+
+        return wrapper
+
+    server.resource = capturing_resource  # type: ignore[assignment]
+    register_resources(server, bad_context)
+
+    raw = await captured["odoo://models"]()
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Failed to list models" in data["error"]
+
+
+# ------------------------------------------------------------------
+# categories_resource error paths
+# ------------------------------------------------------------------
+
+
+async def test_categories_resource_exception() -> None:
+    """categories_resource returns error JSON on exception."""
+
+    def bad_context():
+        raise RuntimeError("Boom")
+
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP(name="test")
+    captured: dict[str, Any] = {}
+    original_resource = server.resource
+
+    def capturing_resource(uri: str, **kwargs: Any):
+        decorator = original_resource(uri, **kwargs)
+
+        def wrapper(fn: Any) -> Any:
+            result = decorator(fn)
+            captured[uri] = fn
+            return result
+
+        return wrapper
+
+    server.resource = capturing_resource  # type: ignore[assignment]
+    register_resources(server, bad_context)
+
+    raw = await captured["odoo://categories"]()
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Failed to list categories" in data["error"]
+
+
+# ------------------------------------------------------------------
+# _get_auth_result edge cases
+# ------------------------------------------------------------------
+
+
+async def test_get_auth_result_no_auth_managers() -> None:
+    """_get_auth_result returns None when no auth managers exist."""
+    from odoo_mcp_gateway.resources.handlers import _get_auth_result
+
+    ctx = _FakeContext()
+    assert _get_auth_result(ctx) is None
+
+
+async def test_get_auth_result_no_auth_result_attr() -> None:
+    """_get_auth_result returns None if auth_mgr has no auth_result attr."""
+    from odoo_mcp_gateway.resources.handlers import _get_auth_result
+
+    mgr = MagicMock(spec=[])  # No attributes at all
+    ctx = _FakeContext()
+    ctx.auth_managers["session"] = mgr
+    result = _get_auth_result(ctx)
+    assert result is None
+
+
+# ------------------------------------------------------------------
+# Gate error paths on resources
+# ------------------------------------------------------------------
+
+
+async def test_record_resource_gate_error() -> None:
+    """record_resource returns error when _resource_gate blocks access."""
+    mock_client = AsyncMock()
+    auth_mgr = _make_auth_mgr(client=mock_client)
+    ctx = _FakeContext(auth_mgr=auth_mgr)
+    # Simulate rate limiter blocking
+    ctx.rate_limiter = MagicMock()
+    ctx.rate_limiter.check.return_value = (False, "Rate limit exceeded")
+    ctx.audit_logger = None
+
+    handlers = _register(ctx)
+    raw = await handlers["odoo://record/{model_name}/{record_id}"](
+        model_name="res.partner", record_id="1"
+    )
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Rate limit" in data["error"]
+
+
+async def test_schema_resource_gate_error() -> None:
+    """schema_resource returns error when _resource_gate blocks access."""
+    auth_mgr = _make_auth_mgr()
+    ctx = _FakeContext(auth_mgr=auth_mgr)
+    ctx.rate_limiter = MagicMock()
+    ctx.rate_limiter.check.return_value = (False, "Rate limit exceeded")
+    ctx.audit_logger = None
+
+    handlers = _register(ctx)
+    raw = await handlers["odoo://schema/{model_name}"](model_name="res.partner")
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Rate limit" in data["error"]
+
+
+async def test_model_detail_gate_error() -> None:
+    """model_detail_resource returns error when gate blocks."""
+    auth_mgr = _make_auth_mgr()
+    ctx = _FakeContext(
+        models={"res.partner": _model("res.partner", "Contact")},
+        auth_mgr=auth_mgr,
+    )
+    ctx.rate_limiter = MagicMock()
+    ctx.rate_limiter.check.return_value = (False, "Rate limit exceeded")
+    ctx.audit_logger = None
+
+    handlers = _register(ctx)
+    raw = await handlers["odoo://models/{model_name}"](model_name="res.partner")
+    data = json.loads(raw)
+    assert "error" in data
+    assert "Rate limit" in data["error"]

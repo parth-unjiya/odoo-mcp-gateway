@@ -175,3 +175,86 @@ class TestContextNormalization:
         adapter = get_adapter(_version(major))
         result = adapter.normalize_context(ctx)
         assert result == ctx
+
+
+# ------------------------------------------------------------------
+# Removed fields
+# ------------------------------------------------------------------
+
+
+class TestRemovedFields:
+    def test_v17_no_removals(self) -> None:
+        adapter = V17Adapter()
+        assert adapter.get_removed_fields("crm.lead") == frozenset()
+
+    def test_v18_no_removals(self) -> None:
+        adapter = V18Adapter()
+        assert adapter.get_removed_fields("crm.lead") == frozenset()
+
+    def test_v19_crm_lead_mobile_removed(self) -> None:
+        adapter = V19Adapter()
+        removed = adapter.get_removed_fields("crm.lead")
+        assert "mobile" in removed
+
+    def test_v19_unknown_model_empty(self) -> None:
+        adapter = V19Adapter()
+        assert adapter.get_removed_fields("res.partner") == frozenset()
+
+    @pytest.mark.parametrize("major", [17, 18, 19])
+    def test_unknown_model_returns_empty(self, major: int) -> None:
+        adapter = get_adapter(_version(major))
+        assert adapter.get_removed_fields("nonexistent.model") == frozenset()
+
+
+# ------------------------------------------------------------------
+# Renamed fields
+# ------------------------------------------------------------------
+
+
+class TestRenamedFields:
+    def test_v17_no_renames(self) -> None:
+        adapter = V17Adapter()
+        assert adapter.get_renamed_fields("sale.order.line") == {}
+
+    def test_v18_no_renames(self) -> None:
+        adapter = V18Adapter()
+        assert adapter.get_renamed_fields("sale.order.line") == {}
+
+    def test_v19_sale_order_line_renames(self) -> None:
+        adapter = V19Adapter()
+        renames = adapter.get_renamed_fields("sale.order.line")
+        assert renames["product_uom"] == "product_uom_id"
+        assert renames["tax_id"] == "tax_ids"
+
+    def test_v19_unknown_model_empty(self) -> None:
+        adapter = V19Adapter()
+        assert adapter.get_renamed_fields("res.partner") == {}
+
+    def test_v19_renamed_fields_returns_copy(self) -> None:
+        adapter = V19Adapter()
+        renames1 = adapter.get_renamed_fields("sale.order.line")
+        renames2 = adapter.get_renamed_fields("sale.order.line")
+        assert renames1 == renames2
+        assert renames1 is not renames2  # must be a copy
+
+    @pytest.mark.parametrize("major", [17, 18, 19])
+    def test_unknown_model_returns_empty(self, major: int) -> None:
+        adapter = get_adapter(_version(major))
+        assert adapter.get_renamed_fields("nonexistent.model") == {}
+
+
+# ------------------------------------------------------------------
+# State field overrides
+# ------------------------------------------------------------------
+
+
+class TestStateFieldOverrides:
+    @pytest.mark.parametrize("major", [17, 18, 19])
+    def test_default_returns_none(self, major: int) -> None:
+        adapter = get_adapter(_version(major))
+        assert adapter.get_state_field_overrides("res.partner") is None
+
+    @pytest.mark.parametrize("major", [17, 18, 19])
+    def test_unknown_model_returns_none(self, major: int) -> None:
+        adapter = get_adapter(_version(major))
+        assert adapter.get_state_field_overrides("nonexistent.model") is None

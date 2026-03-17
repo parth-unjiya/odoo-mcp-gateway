@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from odoo_mcp_gateway.client.base import AuthResult, OdooClientBase
@@ -11,6 +12,29 @@ from odoo_mcp_gateway.client.jsonrpc import JsonRpcClient
 from odoo_mcp_gateway.client.xmlrpc import XmlRpcClient
 
 logger = logging.getLogger(__name__)
+
+# Global registry of active sessions keyed by session key.
+# Used by AuthManager to enforce max_concurrent_sessions.
+_active_sessions: dict[str, AuthManager] = {}
+
+
+def _evict_expired_sessions() -> None:
+    """Remove expired sessions from the global registry (lazy eviction)."""
+    expired = [
+        key
+        for key, mgr in _active_sessions.items()
+        if mgr._is_session_expired()  # noqa: SLF001
+    ]
+    for key in expired:
+        mgr = _active_sessions.pop(key, None)
+        if mgr is not None:
+            mgr._session_key = None  # noqa: SLF001
+            logger.debug("Evicted expired session: %s", key)
+
+
+def get_active_session_count() -> int:
+    """Return the number of currently registered sessions."""
+    return len(_active_sessions)
 
 
 class AuthManager:
@@ -27,11 +51,17 @@ class AuthManager:
         self,
         jsonrpc_client: JsonRpcClient,
         xmlrpc_client: XmlRpcClient,
+        session_timeout_seconds: int = 1800,
+        max_concurrent_sessions: int = 100,
     ) -> None:
         self._jsonrpc = jsonrpc_client
         self._xmlrpc = xmlrpc_client
         self._active_client: OdooClientBase | None = None
         self._auth_result: AuthResult | None = None
+        self._session_timeout_seconds = session_timeout_seconds
+        self._max_concurrent_sessions = max_concurrent_sessions
+        self._last_activity_time: float = 0.0
+        self._session_key: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -39,6 +69,10 @@ class AuthManager:
 
     async def close(self) -> None:
         """Close both RPC clients."""
+        # Remove from global session registry
+        if self._session_key is not None:
+            _active_sessions.pop(self._session_key, None)
+            self._session_key = None
         for client in (self._jsonrpc, self._xmlrpc):
             try:
                 await client.close()
@@ -46,21 +80,74 @@ class AuthManager:
                 logger.debug("Failed to close client", exc_info=True)
         self._active_client = None
         self._auth_result = None
+        self._last_activity_time = 0.0
 
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
 
     def get_active_client(self) -> OdooClientBase:
-        """Return the client that was used for the last successful login."""
+        """Return the client that was used for the last successful login.
+
+        Also performs lazy session timeout enforcement: if the session
+        has expired, the client is invalidated and an auth error is raised.
+        """
         if self._active_client is None:
             raise OdooAuthError("Not authenticated yet. Call login() first.")
+        if self._is_session_expired():
+            self._invalidate_session()
+            raise OdooAuthError(
+                "Session has expired due to inactivity. Please login again."
+            )
+        self._touch_activity()
         return self._active_client
 
     @property
     def auth_result(self) -> AuthResult | None:
         """Last successful :class:`AuthResult`, or ``None``."""
         return self._auth_result
+
+    @property
+    def last_activity_time(self) -> float:
+        """Monotonic timestamp of the last activity, or 0.0 if never used."""
+        return self._last_activity_time
+
+    def _is_session_expired(self) -> bool:
+        """Check whether the current session has exceeded the timeout."""
+        if self._last_activity_time == 0.0:
+            return False
+        elapsed = time.monotonic() - self._last_activity_time
+        return elapsed > self._session_timeout_seconds
+
+    def _touch_activity(self) -> None:
+        """Update the last activity timestamp to now."""
+        self._last_activity_time = time.monotonic()
+
+    def _invalidate_session(self) -> None:
+        """Invalidate the session without closing network resources."""
+        if self._session_key is not None:
+            _active_sessions.pop(self._session_key, None)
+        self._active_client = None
+        self._auth_result = None
+        self._last_activity_time = 0.0
+
+    def register_session(self, session_key: str) -> None:
+        """Register this manager in the global session registry.
+
+        Raises :class:`OdooAuthError` if the maximum concurrent session
+        limit would be exceeded.
+        """
+        # Evict expired sessions lazily before checking the limit.
+        _evict_expired_sessions()
+        # If this session key is already registered (re-login), allow it.
+        if session_key not in _active_sessions:
+            if len(_active_sessions) >= self._max_concurrent_sessions:
+                raise OdooAuthError(
+                    f"Maximum concurrent sessions ({self._max_concurrent_sessions}) "
+                    "reached. Please try again later."
+                )
+        self._session_key = session_key
+        _active_sessions[session_key] = self
 
     # ------------------------------------------------------------------
     # Login
@@ -97,7 +184,10 @@ class AuthManager:
 
         # Fetch user groups to populate result.groups.
         result = await self._fetch_groups(result)
+        # Determine admin status via XML IDs (locale-independent).
+        result = await self._detect_admin_via_xmlid(result)
         self._auth_result = result
+        self._touch_activity()
         return result
 
     # ------------------------------------------------------------------
@@ -150,8 +240,14 @@ class AuthManager:
     # ------------------------------------------------------------------
 
     async def _fetch_groups(self, result: AuthResult) -> AuthResult:
-        """Enrich *result* with the user's group XML IDs."""
-        client = self.get_active_client()
+        """Enrich *result* with the user's group display names.
+
+        Group names are used for RBAC matching. Also derives is_admin from
+        group names as a fallback (used when ``has_group()`` is unavailable).
+        The primary admin detection via XML IDs happens in
+        :meth:`_detect_admin_via_xmlid`.
+        """
+        client = self._get_active_client_unchecked()
         try:
             groups_data: Any = await client.execute_kw(
                 "res.groups",
@@ -165,7 +261,9 @@ class AuthManager:
                     for g in groups_data
                     if isinstance(g, dict)
                 ]
-            # Derive is_admin from group membership if not already set
+            # Derive is_admin from group membership as a fallback.
+            # _detect_admin_via_xmlid runs after this for a more
+            # reliable locale-independent check.
             if not result.is_admin:
                 admin_indicators = {
                     "base.group_system",
@@ -175,3 +273,39 @@ class AuthManager:
         except Exception:
             logger.warning("Could not fetch user groups", exc_info=True)
         return result
+
+    async def _detect_admin_via_xmlid(self, result: AuthResult) -> AuthResult:
+        """Detect admin status using ``res.users.has_group()`` with XML IDs.
+
+        This is locale-independent unlike matching on group display names.
+        Checks for ``base.group_system`` (Settings / Admin) and
+        ``base.group_erp_manager`` (Access Rights).
+        """
+        if result.is_admin:
+            return result
+        client = self._get_active_client_unchecked()
+        for xmlid in ("base.group_system", "base.group_erp_manager"):
+            try:
+                has_group: Any = await client.execute_kw(
+                    "res.users",
+                    "has_group",
+                    [[result.uid], xmlid],
+                )
+                # Odoo's has_group returns a boolean. Be strict about the
+                # type check to avoid false positives when the mock or an
+                # unexpected response returns a non-boolean truthy value.
+                if has_group is True:
+                    result.is_admin = True
+                    return result
+            except Exception:
+                logger.debug("has_group check failed for %s", xmlid, exc_info=True)
+        return result
+
+    def _get_active_client_unchecked(self) -> OdooClientBase:
+        """Return the active client without timeout checks.
+
+        Used internally during login flow where we know the session is fresh.
+        """
+        if self._active_client is None:
+            raise OdooAuthError("Not authenticated yet. Call login() first.")
+        return self._active_client

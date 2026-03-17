@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "odoo-mcp-gateway"
-version = "0.1.1"
+version = "0.2.0"
 description = "Security-first, version-agnostic MCP gateway for Odoo 17/18/19 — works with stock and custom modules via YAML configuration"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,6 +53,12 @@ dev = [
     "types-pyyaml>=6.0",
     "types-defusedxml>=0.7",
 ]
+
+[project.entry-points."odoo_mcp_gateway.plugins"]
+hr = "odoo_mcp_gateway.plugins.core.hr:HRPlugin"
+sales = "odoo_mcp_gateway.plugins.core.sales:SalesPlugin"
+project = "odoo_mcp_gateway.plugins.core.project:ProjectPlugin"
+helpdesk = "odoo_mcp_gateway.plugins.core.helpdesk:HelpdeskPlugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/odoo_mcp_gateway"]

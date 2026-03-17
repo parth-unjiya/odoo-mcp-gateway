@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -11,7 +12,11 @@ from odoo_mcp_gateway.client.base import AuthResult
 from odoo_mcp_gateway.client.exceptions import OdooAuthError
 from odoo_mcp_gateway.client.jsonrpc import JsonRpcClient
 from odoo_mcp_gateway.client.xmlrpc import XmlRpcClient
-from odoo_mcp_gateway.core.auth.manager import AuthManager
+from odoo_mcp_gateway.core.auth.manager import (
+    AuthManager,
+    _active_sessions,
+    get_active_session_count,
+)
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -37,6 +42,8 @@ def _make_manager(
     xmlrpc_auth: AuthResult | Exception | None = None,
     execute_kw_result: Any = None,
     session_info: dict[str, Any] | Exception | None = None,
+    session_timeout_seconds: int = 1800,
+    max_concurrent_sessions: int = 100,
 ) -> AuthManager:
     """Build an AuthManager with mocked clients."""
     json_client = AsyncMock(spec=JsonRpcClient)
@@ -52,7 +59,7 @@ def _make_manager(
     else:
         xml_client.authenticate = AsyncMock(return_value=xmlrpc_auth)
 
-    # execute_kw is used for group fetching
+    # execute_kw is used for group fetching and has_group checks
     if isinstance(execute_kw_result, Exception):
         json_client.execute_kw = AsyncMock(side_effect=execute_kw_result)
         xml_client.execute_kw = AsyncMock(side_effect=execute_kw_result)
@@ -71,6 +78,8 @@ def _make_manager(
     return AuthManager(
         jsonrpc_client=json_client,
         xmlrpc_client=xml_client,
+        session_timeout_seconds=session_timeout_seconds,
+        max_concurrent_sessions=max_concurrent_sessions,
     )
 
 
@@ -395,3 +404,230 @@ class TestAuthManagerClose:
 
         assert mgr._active_client is None
         assert mgr.auth_result is None
+
+
+# ------------------------------------------------------------------
+# Session timeout enforcement
+# ------------------------------------------------------------------
+
+
+class TestSessionTimeout:
+    async def test_fresh_session_not_expired(self) -> None:
+        """A freshly logged-in session should not be expired."""
+        result = _auth_result(uid=1)
+        mgr = _make_manager(jsonrpc_auth=result, session_timeout_seconds=1800)
+        await mgr.login("password", "u", "p", "db")
+
+        # Should not raise
+        client = mgr.get_active_client()
+        assert client is not None
+
+    async def test_expired_session_raises(self) -> None:
+        """An expired session should raise OdooAuthError."""
+        result = _auth_result(uid=1)
+        mgr = _make_manager(jsonrpc_auth=result, session_timeout_seconds=1)
+        await mgr.login("password", "u", "p", "db")
+
+        # Simulate time passing by setting last_activity in the past
+        mgr._last_activity_time = time.monotonic() - 10
+
+        with pytest.raises(OdooAuthError, match="expired"):
+            mgr.get_active_client()
+
+    async def test_activity_refreshes_timeout(self) -> None:
+        """Each get_active_client call should refresh the timeout."""
+        result = _auth_result(uid=1)
+        mgr = _make_manager(jsonrpc_auth=result, session_timeout_seconds=5)
+        await mgr.login("password", "u", "p", "db")
+
+        before = mgr.last_activity_time
+        # Small delay to ensure monotonic time advances
+        mgr.get_active_client()
+        after = mgr.last_activity_time
+
+        assert after >= before
+
+    async def test_expired_session_invalidates_state(self) -> None:
+        """After expiry, auth_result and active_client should be None."""
+        result = _auth_result(uid=1)
+        mgr = _make_manager(jsonrpc_auth=result, session_timeout_seconds=1)
+        await mgr.login("password", "u", "p", "db")
+        mgr._last_activity_time = time.monotonic() - 10
+
+        with pytest.raises(OdooAuthError):
+            mgr.get_active_client()
+
+        assert mgr.auth_result is None
+        assert mgr._active_client is None
+
+    def test_last_activity_time_zero_before_login(self) -> None:
+        """Before login, last_activity_time should be 0."""
+        mgr = _make_manager()
+        assert mgr.last_activity_time == 0.0
+
+
+# ------------------------------------------------------------------
+# Max concurrent sessions
+# ------------------------------------------------------------------
+
+
+class TestMaxConcurrentSessions:
+    def setup_method(self) -> None:
+        """Clear global session registry before each test."""
+        _active_sessions.clear()
+
+    def teardown_method(self) -> None:
+        """Clear global session registry after each test."""
+        _active_sessions.clear()
+
+    async def test_register_session(self) -> None:
+        result = _auth_result(uid=1)
+        mgr = _make_manager(jsonrpc_auth=result, max_concurrent_sessions=5)
+        await mgr.login("password", "u", "p", "db")
+        mgr.register_session("session_1")
+        assert get_active_session_count() == 1
+
+    async def test_exceed_max_sessions_raises(self) -> None:
+        managers = []
+        for i in range(3):
+            result = _auth_result(uid=i + 1)
+            mgr = _make_manager(
+                jsonrpc_auth=result, max_concurrent_sessions=3
+            )
+            await mgr.login("password", "u", "p", "db")
+            mgr.register_session(f"session_{i}")
+            managers.append(mgr)
+
+        assert get_active_session_count() == 3
+
+        # The 4th should fail
+        result = _auth_result(uid=99)
+        mgr = _make_manager(jsonrpc_auth=result, max_concurrent_sessions=3)
+        await mgr.login("password", "u", "p", "db")
+        with pytest.raises(OdooAuthError, match="Maximum concurrent sessions"):
+            mgr.register_session("session_overflow")
+
+    async def test_relogin_same_key_allowed(self) -> None:
+        """Re-registering the same session key should not count as new."""
+        result = _auth_result(uid=1)
+        mgr = _make_manager(jsonrpc_auth=result, max_concurrent_sessions=1)
+        await mgr.login("password", "u", "p", "db")
+        mgr.register_session("session_1")
+        # Re-register same key (e.g., user re-logs in)
+        mgr.register_session("session_1")
+        assert get_active_session_count() == 1
+
+    async def test_close_removes_from_registry(self) -> None:
+        result = _auth_result(uid=1)
+        mgr = _make_manager(jsonrpc_auth=result, max_concurrent_sessions=5)
+        await mgr.login("password", "u", "p", "db")
+        mgr.register_session("session_close_test")
+        assert get_active_session_count() == 1
+
+        await mgr.close()
+        assert get_active_session_count() == 0
+
+
+# ------------------------------------------------------------------
+# Admin detection via XML IDs
+# ------------------------------------------------------------------
+
+
+class TestAdminDetectionViaXmlId:
+    async def test_admin_detected_via_has_group(self) -> None:
+        """has_group('base.group_system') returning True should set is_admin."""
+        result = _auth_result(uid=1, is_admin=False)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        # First call: search_read for groups (returns empty)
+        # Second call: has_group for base.group_system (returns True)
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                True,  # has_group base.group_system
+            ]
+        )
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "admin", "pass", "testdb")
+
+        assert auth.is_admin is True
+
+    async def test_erp_manager_detected_via_has_group(self) -> None:
+        """has_group('base.group_erp_manager') returning True sets is_admin."""
+        result = _auth_result(uid=1, is_admin=False)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        # groups search_read, has_group system=False, has_group erp_manager=True
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                False,  # has_group base.group_system
+                True,  # has_group base.group_erp_manager
+            ]
+        )
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "admin", "pass", "testdb")
+
+        assert auth.is_admin is True
+
+    async def test_non_admin_stays_non_admin(self) -> None:
+        """If has_group returns False for both, is_admin stays False."""
+        result = _auth_result(uid=1, is_admin=False)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                False,  # has_group base.group_system
+                False,  # has_group base.group_erp_manager
+            ]
+        )
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "user", "pass", "testdb")
+
+        assert auth.is_admin is False
+
+    async def test_already_admin_skips_has_group(self) -> None:
+        """If is_admin is already True (from session), has_group is skipped."""
+        result = _auth_result(uid=1, is_admin=True)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+        json_client.execute_kw = AsyncMock(return_value=[])
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "admin", "pass", "testdb")
+
+        assert auth.is_admin is True
+        # Only the group search_read call should happen, no has_group calls
+        assert json_client.execute_kw.call_count == 1
+
+    async def test_has_group_failure_does_not_break(self) -> None:
+        """If has_group raises, admin detection gracefully degrades."""
+        result = _auth_result(uid=1, is_admin=False)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                RuntimeError("network"),  # has_group base.group_system
+                RuntimeError("network"),  # has_group base.group_erp_manager
+            ]
+        )
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "user", "pass", "testdb")
+
+        # Should not raise, admin stays False
+        assert auth.is_admin is False

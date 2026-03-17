@@ -193,3 +193,175 @@ def register_prompts(server: FastMCP, get_context: Any) -> None:
             "5. Summarize the issue and suggest the specific YAML "
             "config change needed"
         )
+
+    # ------------------------------------------------------------------
+    # Workflow prompts (v2 Intelligent Workflow Engine)
+    # ------------------------------------------------------------------
+
+    @server.prompt()
+    async def quote_to_invoice() -> str:
+        """Guide through the full sales cycle from quotation to invoice.
+
+        Walks through: create quotation, add lines, confirm, create
+        invoice, and register payment.
+        """
+        return (
+            "Guide me through the full sales cycle in Odoo.\n"
+            "\n"
+            "Steps:\n"
+            "1. Use get_create_requirements on 'sale.order' to see "
+            "what fields are needed\n"
+            "2. Search res.partner for a customer: "
+            "search_read with [['customer_rank', '>', 0]]\n"
+            "3. Create the quotation via create_record on 'sale.order' "
+            "with partner_id\n"
+            "4. Use get_create_requirements on 'sale.order.line' for "
+            "line item fields\n"
+            "5. Search product.product for products, then add order "
+            "lines via create_record on 'sale.order.line'\n"
+            "6. Use get_record_actions on the quotation to see "
+            "available transitions\n"
+            "7. Confirm the order: execute_method 'action_confirm' on "
+            "'sale.order'\n"
+            "8. Verify the state changed to 'sale' via get_record\n"
+            "9. Create the invoice: execute_method "
+            "'_create_invoices' on 'sale.order' (admin only)\n"
+            "10. Register payment on the invoice if needed\n"
+            "\n"
+            "At each step, use get_record_actions to show what "
+            "transitions are available. If any step fails, explain "
+            "why and how to fix it."
+        )
+
+    @server.prompt()
+    async def employee_onboarding() -> str:
+        """Guide through HR employee onboarding in Odoo.
+
+        Walks through: create employee, set department and job,
+        assign to projects.
+        """
+        return (
+            "Guide me through onboarding a new employee in Odoo.\n"
+            "\n"
+            "Steps:\n"
+            "1. Use get_create_requirements on 'hr.employee' to see "
+            "required fields\n"
+            "2. Search hr.department for departments: "
+            "search_read on 'hr.department'\n"
+            "3. Search hr.job for job positions: "
+            "search_read on 'hr.job'\n"
+            "4. Create the employee via create_record on "
+            "'hr.employee' with name, department_id, job_id, "
+            "and work_email\n"
+            "5. Verify creation via get_record on the new employee\n"
+            "6. Optionally assign to projects:\n"
+            "   a. Search project.project for active projects\n"
+            "   b. Create project tasks or add to project team\n"
+            "7. Set up leave allocation:\n"
+            "   a. Use get_create_requirements on 'hr.leave.allocation'\n"
+            "   b. Create leave allocations for the employee\n"
+            "8. Summarize the onboarding: employee name, department, "
+            "job, projects assigned, leave allocations"
+        )
+
+    @server.prompt()
+    async def ticket_lifecycle() -> str:
+        """Guide through helpdesk ticket lifecycle.
+
+        Walks through: create ticket, assign, work, resolve, close.
+        """
+        return (
+            "Guide me through the helpdesk ticket lifecycle in Odoo.\n"
+            "\n"
+            "Steps:\n"
+            "1. Use get_create_requirements on 'helpdesk.ticket' to "
+            "see required fields\n"
+            "2. Search helpdesk.team for available support teams: "
+            "search_read on 'helpdesk.team'\n"
+            "3. Create the ticket via create_record on "
+            "'helpdesk.ticket' with name, team_id, and description\n"
+            "4. Use get_record_actions on the ticket to see available "
+            "actions\n"
+            "5. Assign the ticket: update_record to set user_id\n"
+            "6. Discover available stages: search_read on "
+            "'helpdesk.stage' with [['team_ids', 'in', [team_id]]]\n"
+            "7. Progress through stages by updating stage_id:\n"
+            "   a. Move to 'In Progress' when work begins\n"
+            "   b. Move to 'Solved' when resolved\n"
+            "   c. Move to 'Closed' / 'Done' to finalize\n"
+            "8. At each stage, verify the change via get_record\n"
+            "9. If the issue recurs, show how to reopen the ticket\n"
+            "\n"
+            "Note: Helpdesk stages are configurable per team. "
+            "Always discover actual stages first."
+        )
+
+    @server.prompt()
+    async def purchase_to_receipt() -> str:
+        """Guide through purchase cycle from PO to receipt.
+
+        Walks through: create PO, confirm, receive products, validate.
+        """
+        return (
+            "Guide me through the purchase cycle in Odoo.\n"
+            "\n"
+            "Steps:\n"
+            "1. Use get_create_requirements on 'purchase.order' to "
+            "see what fields are needed\n"
+            "2. Search res.partner for a vendor: "
+            "search_read with [['supplier_rank', '>', 0]]\n"
+            "3. Create the PO via create_record on 'purchase.order' "
+            "with partner_id\n"
+            "4. Use get_create_requirements on 'purchase.order.line' "
+            "for line item fields\n"
+            "5. Search product.product for products, then add order "
+            "lines via create_record on 'purchase.order.line'\n"
+            "6. Use get_record_actions on the PO to see available "
+            "transitions\n"
+            "7. Confirm the order: execute_method 'button_confirm' on "
+            "'purchase.order'\n"
+            "8. Verify the state changed to 'purchase' via get_record\n"
+            "9. Check for incoming receipts: search_read on "
+            "'stock.picking' with [['origin', '=', po_name]]\n"
+            "10. Validate the receipt when products arrive: "
+            "execute_method 'button_validate' on 'stock.picking'\n"
+            "\n"
+            "At each step, use get_record_actions to show what "
+            "transitions are available."
+        )
+
+    @server.prompt()
+    async def lead_to_opportunity() -> str:
+        """Guide through CRM pipeline from lead to won/lost.
+
+        Walks through: create lead, qualify, convert to opportunity,
+        mark as won or lost.
+        """
+        return (
+            "Guide me through the CRM pipeline in Odoo.\n"
+            "\n"
+            "Steps:\n"
+            "1. Use get_create_requirements on 'crm.lead' to see "
+            "what fields are needed\n"
+            "2. Create a lead via create_record on 'crm.lead' with "
+            "name, type='lead', and contact info\n"
+            "3. Use get_record_actions on the lead to see available "
+            "actions\n"
+            "4. Qualify the lead by updating fields:\n"
+            "   a. Set partner_id (search res.partner first)\n"
+            "   b. Set expected_revenue and probability\n"
+            "5. Convert to opportunity: execute_method "
+            "'convert_opportunity' on 'crm.lead'\n"
+            "6. Progress through CRM stages:\n"
+            "   a. Search crm.stage to discover available stages\n"
+            "   b. Update stage_id via update_record to advance\n"
+            "7. Close the opportunity:\n"
+            "   a. Won: execute_method 'action_set_won' on 'crm.lead'\n"
+            "   b. Lost: execute_method 'action_set_lost' on "
+            "'crm.lead' with optional lost_reason_id\n"
+            "8. Verify final state via get_record\n"
+            "\n"
+            "At each step, use get_record_actions to show what "
+            "transitions are available. Use the odoo://workflow/"
+            "crm.lead resource for the full state machine."
+        )

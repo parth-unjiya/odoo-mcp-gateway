@@ -24,6 +24,30 @@ class VersionAdapter(ABC):
     @abstractmethod
     def supports_bearer_token(self) -> bool: ...
 
+    def get_removed_fields(self, model: str) -> frozenset[str]:
+        """Return fields removed in this Odoo version for *model*.
+
+        Subclasses override to encode known removals.  Returns an empty
+        frozenset by default.
+        """
+        return frozenset()
+
+    def get_renamed_fields(self, model: str) -> dict[str, str]:
+        """Return fields renamed in this Odoo version for *model*.
+
+        Returns a mapping of ``{old_name: new_name}``.
+        Subclasses override to encode known renames.
+        """
+        return {}
+
+    def get_state_field_overrides(self, model: str) -> dict[str, str] | None:
+        """Return version-specific state field metadata for *model*.
+
+        Returns ``None`` if no overrides exist.  Subclasses may return a
+        dict with keys such as ``"field_name"`` and ``"selection_values"``.
+        """
+        return None
+
 
 class V17Adapter(VersionAdapter):
     """Adapter for Odoo 17."""
@@ -70,6 +94,20 @@ class V18Adapter(VersionAdapter):
         return False
 
 
+# Known field renames in Odoo 19
+_V19_FIELD_RENAMES: dict[str, dict[str, str]] = {
+    "sale.order.line": {
+        "product_uom": "product_uom_id",
+        "tax_id": "tax_ids",
+    },
+}
+
+# Known field removals in Odoo 19
+_V19_FIELD_REMOVALS: dict[str, frozenset[str]] = {
+    "crm.lead": frozenset({"mobile"}),
+}
+
+
 class V19Adapter(VersionAdapter):
     """Adapter for Odoo 19."""
 
@@ -94,6 +132,12 @@ class V19Adapter(VersionAdapter):
 
     def supports_bearer_token(self) -> bool:
         return True
+
+    def get_removed_fields(self, model: str) -> frozenset[str]:
+        return _V19_FIELD_REMOVALS.get(model, frozenset())
+
+    def get_renamed_fields(self, model: str) -> dict[str, str]:
+        return dict(_V19_FIELD_RENAMES.get(model, {}))
 
 
 _ADAPTER_MAP: dict[int, type[VersionAdapter]] = {

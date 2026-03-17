@@ -14,6 +14,8 @@ from .middleware import (
     SecurityContext,
     SecurityError,
     SecurityMiddleware,
+    register_tool_operation,
+    register_tool_operations,
     security_gate,
 )
 from .rate_limit import RateLimiter, TokenBucket
@@ -37,5 +39,7 @@ __all__ = [
     "SecurityMiddleware",
     "TokenBucket",
     "load_config",
+    "register_tool_operation",
+    "register_tool_operations",
     "security_gate",
 ]

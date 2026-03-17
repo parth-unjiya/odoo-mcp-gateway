@@ -6,6 +6,10 @@
 
 # Models that are NEVER exposed through the gateway, regardless of
 # user role.  These typically contain security-critical internals.
+#
+# NOTE: Some models below are also hardcoded in the gateway's
+# safety guardrails and cannot be unblocked even if removed
+# from this list. See README for the full hardcoded list.
 always_blocked:
   - ir.config_parameter
   - res.users.apikeys

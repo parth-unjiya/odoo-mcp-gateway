@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 
 from odoo_mcp_gateway import __version__
@@ -30,9 +29,7 @@ def main() -> None:
 
     server = create_server(settings)
 
-    transport = os.environ.get("MCP_TRANSPORT", settings.mcp_transport)
-
-    if transport == "streamable-http":
+    if settings.mcp_transport == "streamable-http":
         server.run(transport="streamable-http")
     else:
         server.run(transport="stdio")

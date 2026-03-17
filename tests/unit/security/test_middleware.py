@@ -14,9 +14,13 @@ from odoo_mcp_gateway.core.security.config_loader import (
     RestrictionConfig,
 )
 from odoo_mcp_gateway.core.security.middleware import (
+    _TOOL_OPERATION_MAP,
+    _WRITE_TOOLS,
     SecurityContext,
     SecurityError,
     SecurityMiddleware,
+    register_tool_operation,
+    register_tool_operations,
 )
 from odoo_mcp_gateway.core.security.rate_limit import RateLimiter
 from odoo_mcp_gateway.core.security.rbac import RBACManager
@@ -509,3 +513,88 @@ class TestWriteValueSanitization:
         call_kwargs = handler.call_args[1]
         assert "wage" not in call_kwargs.get("values", {})
         assert call_kwargs["values"]["name"] == "John"
+
+
+# ── Plugin operation type registration ────────────────────────────
+
+
+class TestRegisterToolOperation:
+    def test_register_read_operation(self) -> None:
+        register_tool_operation("my_plugin_read", "read")
+        assert _TOOL_OPERATION_MAP["my_plugin_read"] == "read"
+        assert "my_plugin_read" not in _WRITE_TOOLS
+        # Cleanup
+        _TOOL_OPERATION_MAP.pop("my_plugin_read", None)
+
+    def test_register_write_operation_adds_to_write_tools(self) -> None:
+        register_tool_operation("my_plugin_write", "write")
+        assert _TOOL_OPERATION_MAP["my_plugin_write"] == "write"
+        assert "my_plugin_write" in _WRITE_TOOLS
+        # Cleanup
+        _TOOL_OPERATION_MAP.pop("my_plugin_write", None)
+        _WRITE_TOOLS.discard("my_plugin_write")
+
+    def test_register_create_operation_adds_to_write_tools(self) -> None:
+        register_tool_operation("my_plugin_create", "create")
+        assert _TOOL_OPERATION_MAP["my_plugin_create"] == "create"
+        assert "my_plugin_create" in _WRITE_TOOLS
+        # Cleanup
+        _TOOL_OPERATION_MAP.pop("my_plugin_create", None)
+        _WRITE_TOOLS.discard("my_plugin_create")
+
+    def test_register_delete_operation_adds_to_write_tools(self) -> None:
+        register_tool_operation("my_plugin_delete", "delete")
+        assert _TOOL_OPERATION_MAP["my_plugin_delete"] == "delete"
+        assert "my_plugin_delete" in _WRITE_TOOLS
+        # Cleanup
+        _TOOL_OPERATION_MAP.pop("my_plugin_delete", None)
+        _WRITE_TOOLS.discard("my_plugin_delete")
+
+    def test_register_auth_operation(self) -> None:
+        register_tool_operation("my_auth_tool", "auth")
+        assert _TOOL_OPERATION_MAP["my_auth_tool"] == "auth"
+        assert "my_auth_tool" not in _WRITE_TOOLS
+        # Cleanup
+        _TOOL_OPERATION_MAP.pop("my_auth_tool", None)
+
+    def test_invalid_operation_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid operation"):
+            register_tool_operation("bad_tool", "execute")
+
+    def test_overwrite_existing_operation(self) -> None:
+        register_tool_operation("overwrite_tool", "read")
+        register_tool_operation("overwrite_tool", "write")
+        assert _TOOL_OPERATION_MAP["overwrite_tool"] == "write"
+        assert "overwrite_tool" in _WRITE_TOOLS
+        # Cleanup
+        _TOOL_OPERATION_MAP.pop("overwrite_tool", None)
+        _WRITE_TOOLS.discard("overwrite_tool")
+
+
+class TestRegisterToolOperations:
+    def test_bulk_registration(self) -> None:
+        mapping = {
+            "bulk_read": "read",
+            "bulk_write": "write",
+            "bulk_create": "create",
+        }
+        register_tool_operations(mapping)
+        assert _TOOL_OPERATION_MAP["bulk_read"] == "read"
+        assert _TOOL_OPERATION_MAP["bulk_write"] == "write"
+        assert _TOOL_OPERATION_MAP["bulk_create"] == "create"
+        assert "bulk_write" in _WRITE_TOOLS
+        assert "bulk_create" in _WRITE_TOOLS
+        assert "bulk_read" not in _WRITE_TOOLS
+        # Cleanup
+        for key in mapping:
+            _TOOL_OPERATION_MAP.pop(key, None)
+            _WRITE_TOOLS.discard(key)
+
+    def test_bulk_with_invalid_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid operation"):
+            register_tool_operations({"ok_tool": "read", "bad_tool": "destroy"})
+        # The valid one may or may not have been registered before error
+        _TOOL_OPERATION_MAP.pop("ok_tool", None)
+
+    def test_empty_mapping(self) -> None:
+        register_tool_operations({})  # Should not raise

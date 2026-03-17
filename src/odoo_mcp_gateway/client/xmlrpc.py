@@ -250,3 +250,5 @@ class XmlRpcClient(OdooClientBase):
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+        self._password = None
+        self._db = None
