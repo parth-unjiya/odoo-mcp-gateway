@@ -24,6 +24,11 @@ class VersionAdapter(ABC):
     @abstractmethod
     def supports_bearer_token(self) -> bool: ...
 
+    # NOTE: The following methods (get_removed_fields, get_renamed_fields,
+    # get_state_field_overrides) are infrastructure for future field-tracking
+    # features.  They are tested but not yet wired into production code paths.
+    # See V2_ROADMAP.md for integration plans.
+
     def get_removed_fields(self, model: str) -> frozenset[str]:
         """Return fields removed in this Odoo version for *model*.
 

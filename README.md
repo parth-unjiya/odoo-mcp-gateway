@@ -53,7 +53,7 @@ Request --> Rate Limit --> Authentication Check --> RBAC Tool Access
 ```
 
 Hardcoded safety guardrails that cannot be overridden by YAML:
-- **18 always-blocked models** (ir.config_parameter, ir.cron, ir.module.module, ir.rule, ir.mail_server, etc.)
+- **17 always-blocked models** (ir.config_parameter, ir.cron, ir.module.module, ir.rule, ir.mail_server, etc.)
 - **18 always-blocked methods** (sudo, with_user, with_env, _sql, _write, _create, etc.)
 - **28 ORM methods blocked in execute_method** (prevents bypassing field-level checks)
 
@@ -114,6 +114,11 @@ claude mcp add odoo -- python -m odoo_mcp_gateway
 | `MCP_HOST` | `127.0.0.1` | HTTP host (streamable-http mode) |
 | `MCP_PORT` | `8080` | HTTP port (streamable-http mode) |
 | `MCP_LOG_LEVEL` | `INFO` | Logging level |
+| `CONFIG_DIR` | `.` | Directory for YAML config files |
+| `SESSION_TIMEOUT_SECONDS` | `1800` | Session inactivity timeout |
+| `MAX_CONCURRENT_SESSIONS` | `100` | Maximum concurrent sessions |
+| `RATE_LIMIT_GLOBAL` | `60` | Requests per minute (global) |
+| `RATE_LIMIT_WRITE` | `20` | Write operations per minute |
 
 ## Security
 
@@ -416,6 +421,10 @@ src/odoo_mcp_gateway/
 │   ├── auth/manager.py          # 3 auth strategies
 │   ├── connection/manager.py    # Circuit breaker + retry
 │   ├── version/                 # Odoo 17/18/19 detection + adapters
+│   ├── workflow/
+│   │   ├── definitions.py      # WorkflowDef, StateDef, TransitionDef dataclasses
+│   │   ├── registry.py         # Workflow registration and lookup
+│   │   └── stock_workflows/    # Built-in workflows (sale, purchase, HR, etc.)
 │   ├── security/
 │   │   ├── restrictions.py      # 3-tier model/method restrictions + hardcoded guardrails
 │   │   ├── rbac.py              # Tool access + field filtering
@@ -431,9 +440,10 @@ src/odoo_mcp_gateway/
 ├── tools/
 │   ├── auth.py                  # login tool
 │   ├── schema.py                # list_models, get_model_fields
-│   └── crud.py                  # search_read, create/update/delete, execute_method
-├── resources/handlers.py        # 5 MCP resources (odoo:// URIs)
-├── prompts/handlers.py          # 7 MCP prompt templates
+│   ├── crud.py                  # search_read, create/update/delete, execute_method
+│   └── workflow.py              # get_create_requirements, get_record_actions
+├── resources/handlers.py        # 6 MCP resources (odoo:// URIs)
+├── prompts/handlers.py          # 12 MCP prompt templates
 ├── plugins/
 │   ├── base.py, registry.py     # Plugin ABC + entry_point discovery
 │   └── core/                    # Built-in plugins (HR, Sales, Project, Helpdesk)
@@ -443,7 +453,7 @@ src/odoo_mcp_gateway/
 
 ## Testing
 
-1,100+ tests across all layers with 93% code coverage:
+1,300+ tests across all layers with 94% code coverage:
 
 ```
 tests/unit/

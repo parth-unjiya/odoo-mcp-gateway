@@ -134,3 +134,68 @@ async def test_debug_access_prompt_without_model() -> None:
     result = await handlers["debug_access"]()
     assert "the problematic model" in result
     assert "read" in result
+
+
+# ------------------------------------------------------------------
+# Workflow prompt tests
+# ------------------------------------------------------------------
+
+
+class TestWorkflowPrompts:
+    """Tests for the 5 workflow-related prompt handlers."""
+
+    async def test_quote_to_invoice_returns_string(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["quote_to_invoice"]()
+        assert isinstance(result, str)
+        assert "sale.order" in result.lower() or "quotation" in result.lower()
+
+    async def test_quote_to_invoice_mentions_confirm(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["quote_to_invoice"]()
+        assert "action_confirm" in result
+
+    async def test_employee_onboarding_returns_string(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["employee_onboarding"]()
+        assert isinstance(result, str)
+        assert "hr.employee" in result.lower() or "employee" in result.lower()
+
+    async def test_employee_onboarding_mentions_department(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["employee_onboarding"]()
+        assert "department" in result.lower()
+
+    async def test_ticket_lifecycle_returns_string(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["ticket_lifecycle"]()
+        assert isinstance(result, str)
+        assert "helpdesk.ticket" in result.lower() or "ticket" in result.lower()
+
+    async def test_ticket_lifecycle_mentions_stages(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["ticket_lifecycle"]()
+        assert "stage" in result.lower()
+
+    async def test_purchase_to_receipt_returns_string(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["purchase_to_receipt"]()
+        assert isinstance(result, str)
+        assert "purchase.order" in result.lower() or "purchase" in result.lower()
+
+    async def test_purchase_to_receipt_mentions_confirm(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["purchase_to_receipt"]()
+        assert "button_confirm" in result
+
+    async def test_lead_to_opportunity_returns_string(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["lead_to_opportunity"]()
+        assert isinstance(result, str)
+        assert "crm.lead" in result.lower() or "lead" in result.lower()
+
+    async def test_lead_to_opportunity_mentions_won_lost(self) -> None:
+        handlers = _register_and_get_prompts()
+        result = await handlers["lead_to_opportunity"]()
+        assert "action_set_won" in result
+        assert "action_set_lost" in result

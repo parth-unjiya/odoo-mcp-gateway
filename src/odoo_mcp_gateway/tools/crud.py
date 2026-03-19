@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.core.security import security_gate
-from odoo_mcp_gateway.server import _get_auth_manager, _get_client
+from odoo_mcp_gateway.server import (
+    _get_auth_manager,
+    _get_client,
+    get_current_session_key,
+)
 from odoo_mcp_gateway.utils.domain_builder import (
     DomainValidationError,
     validate_domain,
@@ -43,6 +47,8 @@ _MAX_METHOD_LEN = 128
 
 def _validate_method(method: str) -> str:
     """Validate and normalize a method name. Raises ValueError if invalid."""
+    # Security: lowercase to prevent case-based bypass of blocked method checks
+    # (e.g., "Sudo" would bypass "sudo" in _ALWAYS_BLOCKED_METHODS)
     method = method.strip().lower()
     if not method or len(method) > _MAX_METHOD_LEN or not _METHOD_RE.match(method):
         raise ValueError(f"Invalid method name: {method!r}")
@@ -128,6 +134,24 @@ def _validate_write_values(values: dict[str, Any]) -> None:
     _check(values)
 
 
+# Odoo context keys that can bypass security controls or audit trails.
+# These are stripped from kwargs["context"] in execute_method to prevent
+# attackers from disabling archived-record filtering, audit logging,
+# mail tracking, or cross-company access boundaries.
+_DANGEROUS_CONTEXT_KEYS = frozenset({
+    "active_test",
+    "tracking_disable",
+    "mail_create_nolog",
+    "mail_create_nosubscribe",
+    "mail_notrack",
+    "force_company",
+    "allowed_company_ids",
+    "default_company_id",
+    "no_reset_password",
+    "import_compat",
+    "check_move_validity",
+})
+
 # ORM methods that are already exposed through dedicated CRUD tools.
 # Blocking them in execute_method prevents bypassing field-level checks.
 _BLOCKED_ORM_METHODS = frozenset(
@@ -210,7 +234,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             is_admin = auth_result.is_admin if auth_result else False
             user_groups = auth_result.groups if auth_result else []
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "search_read", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -309,7 +335,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             is_admin = auth_result.is_admin if auth_result else False
             user_groups = auth_result.groups if auth_result else []
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "get_record", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -371,7 +399,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             auth_result = auth_mgr.auth_result
             is_admin = auth_result.is_admin if auth_result else False
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "search_count", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -418,7 +448,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             is_admin = auth_result.is_admin if auth_result else False
             user_groups = auth_result.groups if auth_result else []
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "create_record", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -487,7 +519,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             is_admin = auth_result.is_admin if auth_result else False
             user_groups = auth_result.groups if auth_result else []
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "update_record", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -554,7 +588,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             auth_result = auth_mgr.auth_result
             is_admin = auth_result.is_admin if auth_result else False
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "delete_record", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -600,7 +636,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             is_admin = auth_result.is_admin if auth_result else False
             user_groups = auth_result.groups if auth_result else []
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "read_group", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -678,7 +716,9 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             auth_result = auth_mgr.auth_result
             is_admin = auth_result.is_admin if auth_result else False
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "execute_method", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -714,6 +754,19 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
 
             # Validate args depth/size
             _validate_method_args(args or [], kwargs or {})
+
+            # Sanitize dangerous context keys from kwargs to prevent
+            # bypassing archived-record filtering, audit trails,
+            # mail tracking, or cross-company access boundaries.
+            if kwargs and "context" in kwargs:
+                ctx = kwargs["context"]
+                if isinstance(ctx, dict):
+                    stripped = {
+                        k: v
+                        for k, v in ctx.items()
+                        if k not in _DANGEROUS_CONTEXT_KEYS
+                    }
+                    kwargs = {**kwargs, "context": stripped}
 
             # Validate and prepend record_ids if provided
             call_args: list[Any] = []

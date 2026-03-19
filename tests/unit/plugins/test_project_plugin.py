@@ -25,6 +25,7 @@ def mock_context():
     ctx.rate_limiter = None
     ctx.audit_logger = None
     ctx.rbac.check_tool_access.return_value = None
+    ctx.restrictions.check_field_write.return_value = None
     return ctx, client
 
 
@@ -262,3 +263,105 @@ class TestUpdateTaskStage:
         client.execute_kw.side_effect = Exception("Access denied")
         result = await tools["update_task_stage"](task_id=1, stage_id=2)
         assert "Access denied" in result["error"]
+
+
+# ── IDOR Protection tests ──────────────────────────────────────
+
+
+def _make_idor_context(*, uid: int, is_admin: bool):
+    """Create a mock context with explicit admin/non-admin settings."""
+    ctx = MagicMock()
+    client = AsyncMock()
+    auth_mgr = MagicMock()
+    auth_mgr.get_active_client.return_value = client
+    auth_mgr.auth_result = MagicMock(
+        uid=uid,
+        is_admin=is_admin,
+        groups=["base.group_system" if is_admin else "base.group_user"],
+    )
+    ctx.auth_managers = {"session": auth_mgr}
+    ctx.sanitize_error = lambda exc: str(exc)
+    ctx.rate_limiter = None
+    ctx.audit_logger = None
+    ctx.rbac.check_tool_access.return_value = None
+    ctx.restrictions.check_field_write.return_value = None
+    return ctx, client
+
+
+def _register_project(ctx):
+    """Register Project plugin on a mock server and return captured tools."""
+    server = MagicMock()
+    captured: dict = {}
+
+    def fake_tool():
+        def decorator(func):
+            captured[func.__name__] = func
+            return func
+
+        return decorator
+
+    server.tool = fake_tool
+    plugin = ProjectPlugin()
+    plugin.register(server, ctx)
+    return captured
+
+
+@pytest.fixture
+def nonadmin_project_context():
+    return _make_idor_context(uid=42, is_admin=False)
+
+
+@pytest.fixture
+def admin_project_context():
+    return _make_idor_context(uid=1, is_admin=True)
+
+
+@pytest.fixture
+def nonadmin_project_tools(nonadmin_project_context):
+    ctx, _ = nonadmin_project_context
+    return _register_project(ctx)
+
+
+@pytest.fixture
+def admin_project_tools(admin_project_context):
+    ctx, _ = admin_project_context
+    return _register_project(ctx)
+
+
+class TestIDORProtection:
+    """Verify user_ids scoping prevents cross-user access in update_task_stage."""
+
+    async def test_nonadmin_update_task_stage_includes_user_ids_in_domain(
+        self, nonadmin_project_tools, nonadmin_project_context
+    ):
+        """Non-admin update_task_stage must include user_ids filter in domain."""
+        _, client = nonadmin_project_context
+        client.execute_kw.side_effect = [
+            [{"id": 10, "name": "Fix bug", "stage_id": [1, "To Do"]}],
+            True,  # write
+        ]
+        await nonadmin_project_tools["update_task_stage"](task_id=10, stage_id=2)
+        # First execute_kw call is the task verification search
+        call_args = client.execute_kw.call_args_list[0]
+        domain = call_args[0][2][0]
+        assert ["user_ids", "in", [42]] in domain
+
+    async def test_admin_update_task_stage_does_not_include_user_ids_in_domain(
+        self, admin_project_tools, admin_project_context
+    ):
+        """Admin update_task_stage must NOT include user_ids filter in domain."""
+        _, client = admin_project_context
+        client.execute_kw.side_effect = [
+            [{"id": 10, "name": "Fix bug", "stage_id": [1, "To Do"]}],
+            True,  # write
+        ]
+        await admin_project_tools["update_task_stage"](task_id=10, stage_id=2)
+        call_args = client.execute_kw.call_args_list[0]
+        domain = call_args[0][2][0]
+        assert ["id", "=", 10] in domain
+        # user_ids filter must NOT be present for admin
+        user_ids_entries = [
+            d for d in domain
+            if isinstance(d, list) and d[0] == "user_ids"
+        ]
+        assert len(user_ids_entries) == 0

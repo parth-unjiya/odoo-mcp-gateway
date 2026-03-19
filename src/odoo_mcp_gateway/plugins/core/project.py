@@ -296,6 +296,15 @@ class ProjectPlugin(OdooPlugin):
                 old_stage = task.get("stage_id")
 
                 values = {"stage_id": stage_id}
+
+                # Check blocked write fields
+                for field_name in values:
+                    field_msg = context.restrictions.check_field_write(
+                        "project.task", field_name, is_admin
+                    )
+                    if field_msg:
+                        return {"error": field_msg}
+
                 sanitized = context.rbac.sanitize_write_values(
                     values, "project.task", user_groups, is_admin
                 )

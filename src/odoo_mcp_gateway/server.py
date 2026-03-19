@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import atexit
 import contextvars
 import logging
 from typing import Any
@@ -73,6 +75,15 @@ class GatewayContext:
         )
         self._models_discovered = False
 
+    async def cleanup(self) -> None:
+        """Close all auth managers and their underlying connections."""
+        for key, mgr in list(self.auth_managers.items()):
+            try:
+                await mgr.close()
+            except Exception:
+                logger.debug("Error closing auth manager %s", key, exc_info=True)
+        self.auth_managers.clear()
+
     def sanitize_error(self, exc: Exception) -> str:
         """Sanitize an exception message for client consumption."""
         from odoo_mcp_gateway.client.exceptions import (
@@ -140,6 +151,34 @@ def _get_auth_manager(gateway: GatewayContext) -> AuthManager:
     return next(iter(gateway.auth_managers.values()))
 
 
+def _sync_cleanup(gateway: GatewayContext) -> None:
+    """Synchronous atexit handler that cleans up auth manager sessions.
+
+    Since auth managers use async httpx clients, we attempt to run
+    the async cleanup in an event loop.  If no loop is available
+    (e.g. interpreter shutdown), we log a warning instead.
+    """
+    if not gateway.auth_managers:
+        return
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Cannot block on a running loop; log a warning.
+            logger.warning(
+                "Event loop still running at shutdown; "
+                "%d auth session(s) may not be closed cleanly",
+                len(gateway.auth_managers),
+            )
+        else:
+            loop.run_until_complete(gateway.cleanup())
+    except RuntimeError:
+        logger.warning(
+            "No event loop available at shutdown; "
+            "%d auth session(s) were not closed",
+            len(gateway.auth_managers),
+        )
+
+
 def create_server(settings: Settings) -> FastMCP:
     """Create and configure the MCP server with all tools registered."""
     server = FastMCP(
@@ -150,6 +189,10 @@ def create_server(settings: Settings) -> FastMCP:
 
     gateway_config = load_config(settings.config_dir)
     gateway = GatewayContext(settings, gateway_config)
+
+    # Register atexit handler so auth manager connections are cleaned up
+    # when the server process exits.
+    atexit.register(_sync_cleanup, gateway)
 
     # Import and register all tool groups
     from odoo_mcp_gateway.tools.auth import register_auth_tools
@@ -186,20 +229,23 @@ def create_server(settings: Settings) -> FastMCP:
         logger.warning("Failed to load workflow tools", exc_info=True)
 
     # Discover and activate plugins
-    from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin
-    from odoo_mcp_gateway.plugins.core.hr import HRPlugin
-    from odoo_mcp_gateway.plugins.core.project import ProjectPlugin
-    from odoo_mcp_gateway.plugins.core.sales import SalesPlugin
     from odoo_mcp_gateway.plugins.registry import PluginRegistry
 
     plugin_registry = PluginRegistry()
 
-    # Register built-in domain plugins
-    for plugin_cls in (HRPlugin, SalesPlugin, ProjectPlugin, HelpdeskPlugin):
-        plugin_registry.register_plugin(plugin_cls)
-
-    # Discover any external plugins from entry_points
+    # Discover plugins via entry_points (works when package is installed)
     plugin_registry.discover()
+    if not plugin_registry._plugins:
+        # Fallback: manual registration if entry points not available
+        from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+        from odoo_mcp_gateway.plugins.core.project import ProjectPlugin
+        from odoo_mcp_gateway.plugins.core.sales import SalesPlugin
+
+        plugin_registry.register_plugin(HRPlugin)
+        plugin_registry.register_plugin(SalesPlugin)
+        plugin_registry.register_plugin(ProjectPlugin)
+        plugin_registry.register_plugin(HelpdeskPlugin)
 
     # Activate all enabled plugins
     activated = plugin_registry.activate(server, gateway)

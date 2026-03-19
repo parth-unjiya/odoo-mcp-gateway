@@ -229,14 +229,15 @@ async def test_model_detail_unknown_model() -> None:
 
 
 async def test_model_detail_without_auth() -> None:
+    """model_detail_resource now returns auth error when not authenticated."""
     ctx = _FakeContext(
         models={"res.partner": _model("res.partner", "Contact")},
     )
     handlers = _register(ctx)
     raw = await handlers["odoo://models/{model_name}"](model_name="res.partner")
     data = json.loads(raw)
-    assert data["model"] == "res.partner"
-    assert data["fields"] == "Login required to view fields"
+    assert "error" in data
+    assert "Not authenticated" in data["error"] or "login" in data["error"].lower()
 
 
 # ------------------------------------------------------------------
@@ -1045,3 +1046,92 @@ async def test_model_detail_gate_error() -> None:
     data = json.loads(raw)
     assert "error" in data
     assert "Rate limit" in data["error"]
+
+
+# ------------------------------------------------------------------
+# workflow_resource tests
+# ------------------------------------------------------------------
+
+
+class TestWorkflowResource:
+    """Tests for the odoo://workflow/{model_name} resource handler."""
+
+    async def test_valid_model_with_workflow_returns_definition(self) -> None:
+        """workflow_resource returns workflow definition when available."""
+        ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+        wf_data = {
+            "model": "sale.order",
+            "states": [
+                {"name": "draft", "label": "Quotation"},
+                {"name": "sale", "label": "Sales Order"},
+            ],
+            "transitions": [
+                {"from": "draft", "to": "sale", "method": "action_confirm"},
+            ],
+        }
+        wf_registry = MagicMock()
+        wf_registry.to_dict.return_value = wf_data
+        ctx.workflow_registry = wf_registry
+
+        handlers = _register(ctx)
+        raw = await handlers["odoo://workflow/{model_name}"](model_name="sale.order")
+        data = json.loads(raw)
+        assert data["model"] == "sale.order"
+        assert len(data["states"]) == 2
+        assert len(data["transitions"]) == 1
+        assert data["transitions"][0]["method"] == "action_confirm"
+
+    async def test_valid_model_without_workflow_returns_not_found(self) -> None:
+        """workflow_resource returns error when no workflow is defined for model."""
+        ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+        wf_registry = MagicMock()
+        wf_registry.to_dict.return_value = None
+        ctx.workflow_registry = wf_registry
+
+        handlers = _register(ctx)
+        raw = await handlers["odoo://workflow/{model_name}"](model_name="res.partner")
+        data = json.loads(raw)
+        assert "error" in data
+        assert "No workflow definition found" in data["error"]
+
+    async def test_invalid_model_name_format_returns_error(self) -> None:
+        """workflow_resource rejects invalid model name format."""
+        ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+        wf_registry = MagicMock()
+        ctx.workflow_registry = wf_registry
+
+        handlers = _register(ctx)
+        raw = await handlers["odoo://workflow/{model_name}"](
+            model_name="INVALID MODEL!",
+        )
+        data = json.loads(raw)
+        assert "error" in data
+        assert "Invalid model name" in data["error"]
+
+    async def test_no_workflow_registry_returns_not_available(self) -> None:
+        """workflow_resource returns error when workflow_registry is missing."""
+        ctx = _FakeContext(auth_mgr=_make_auth_mgr())
+        # Do NOT set ctx.workflow_registry -- _FakeContext does not have it
+
+        handlers = _register(ctx)
+        raw = await handlers["odoo://workflow/{model_name}"](model_name="sale.order")
+        data = json.loads(raw)
+        assert "error" in data
+        assert "Workflow engine not available" in data["error"]
+
+    async def test_rate_limit_blocks_workflow_resource(self) -> None:
+        """workflow_resource returns error when rate limiter blocks access."""
+        auth_mgr = _make_auth_mgr()
+        ctx = _FakeContext(auth_mgr=auth_mgr)
+        ctx.rate_limiter = MagicMock()
+        ctx.rate_limiter.check.return_value = (False, "Rate limit exceeded")
+        ctx.audit_logger = None
+        wf_registry = MagicMock()
+        wf_registry.to_dict.return_value = {"model": "sale.order"}
+        ctx.workflow_registry = wf_registry
+
+        handlers = _register(ctx)
+        raw = await handlers["odoo://workflow/{model_name}"](model_name="sale.order")
+        data = json.loads(raw)
+        assert "error" in data
+        assert "Rate limit" in data["error"]

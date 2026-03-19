@@ -120,6 +120,15 @@ class HRPlugin(OdooPlugin):
                     "employee_id": emp["id"],
                     "check_in": now,
                 }
+
+                # Check blocked write fields
+                for field_name in values:
+                    field_msg = context.restrictions.check_field_write(
+                        "hr.attendance", field_name, is_admin
+                    )
+                    if field_msg:
+                        return {"error": field_msg}
+
                 sanitized = context.rbac.sanitize_write_values(
                     values, "hr.attendance", user_groups, is_admin
                 )
@@ -208,6 +217,15 @@ class HRPlugin(OdooPlugin):
 
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                 values = {"check_out": now}
+
+                # Check blocked write fields
+                for field_name in values:
+                    field_msg = context.restrictions.check_field_write(
+                        "hr.attendance", field_name, is_admin
+                    )
+                    if field_msg:
+                        return {"error": field_msg}
+
                 sanitized = context.rbac.sanitize_write_values(
                     values, "hr.attendance", user_groups, is_admin
                 )
@@ -465,6 +483,14 @@ class HRPlugin(OdooPlugin):
                 }
                 if reason:
                     values["name"] = reason
+
+                # Check blocked write fields
+                for field_name in values:
+                    field_msg = context.restrictions.check_field_write(
+                        "hr.leave", field_name, is_admin
+                    )
+                    if field_msg:
+                        return {"error": field_msg}
 
                 sanitized = context.rbac.sanitize_write_values(
                     values, "hr.leave", user_groups, is_admin

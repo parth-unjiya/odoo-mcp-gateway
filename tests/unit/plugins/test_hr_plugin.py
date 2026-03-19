@@ -26,6 +26,7 @@ def mock_context():
     ctx.rate_limiter = None
     ctx.audit_logger = None
     ctx.rbac.check_tool_access.return_value = None
+    ctx.restrictions.check_field_write.return_value = None
     return ctx, client
 
 

@@ -175,6 +175,14 @@ class HelpdeskPlugin(OdooPlugin):
                         return {"error": "team_id must be a positive integer"}
                     values["team_id"] = team_id
 
+                # Check blocked write fields
+                for field_name in values:
+                    field_msg = context.restrictions.check_field_write(
+                        _TICKET_MODEL, field_name, is_admin
+                    )
+                    if field_msg:
+                        return {"error": field_msg}
+
                 sanitized = context.rbac.sanitize_write_values(
                     values, _TICKET_MODEL, user_groups, is_admin
                 )
@@ -261,6 +269,15 @@ class HelpdeskPlugin(OdooPlugin):
                 old_stage = ticket.get("stage_id")
 
                 values = {"stage_id": stage_id}
+
+                # Check blocked write fields
+                for field_name in values:
+                    field_msg = context.restrictions.check_field_write(
+                        _TICKET_MODEL, field_name, is_admin
+                    )
+                    if field_msg:
+                        return {"error": field_msg}
+
                 sanitized = context.rbac.sanitize_write_values(
                     values, _TICKET_MODEL, user_groups, is_admin
                 )

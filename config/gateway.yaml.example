@@ -14,7 +14,7 @@ server:
   name: "odoo-mcp-gateway"
   transport: stdio            # "stdio" or "streamable-http"
   host: 127.0.0.1             # bind address for streamable-http
-  port: 8000                  # bind port for streamable-http
+  port: 8080                  # bind port for streamable-http
   log_level: INFO             # DEBUG, INFO, WARNING, ERROR
   max_concurrent_sessions: 100
   session_timeout_seconds: 1800

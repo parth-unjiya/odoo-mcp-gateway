@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -98,7 +99,12 @@ class JsonRpcClient(OdooClientBase):
         if sid:
             self._session_id = sid
 
-        data: dict[str, Any] = response.json()
+        try:
+            data: dict[str, Any] = response.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise OdooConnectionError(
+                f"Non-JSON response from Odoo (HTTP {response.status_code})"
+            ) from exc
 
         if "error" in data:
             self._raise_for_error(data["error"])

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -125,19 +123,12 @@ class SecurityContext:
 
 
 class SecurityMiddleware:
-    """Orchestrates the full security pipeline for each tool invocation.
+    """Container for security pipeline components.
 
-    Pipeline:
-    1. Rate limit check
-    2. RBAC tool access check
-    3. Model restriction check (if 'model' in params)
-    4. Method restriction check (if tool is 'execute_method')
-    5. Field write check (if tool writes fields)
-    6. Sanitize write values (RBAC)
-    7. Execute handler
-    8. Filter response fields (RBAC)
-    9. Audit log
-    On error: sanitize error, audit log, re-raise.
+    Individual security checks are executed via :func:`security_gate` which
+    is called at the start of every tool handler.  This class holds the
+    configured security components so they can be accessed from
+    :class:`~odoo_mcp_gateway.server.GatewayContext`.
     """
 
     def __init__(
@@ -153,135 +144,6 @@ class SecurityMiddleware:
         self._rate_limiter = rate_limiter
         self._audit = audit
         self._sanitizer = sanitizer
-
-    async def execute(
-        self,
-        tool_name: str,
-        params: dict[str, Any],
-        context: SecurityContext,
-        handler: Callable[..., Awaitable[Any]],
-    ) -> Any:
-        """Execute a tool through the full security pipeline."""
-        start = time.monotonic()
-        model = params.get("model")
-        is_write = tool_name in _WRITE_TOOLS
-        operation = _TOOL_OPERATION_MAP.get(tool_name, "read")
-
-        try:
-            # 1. Rate limit check
-            allowed, rate_msg = self._rate_limiter.check(
-                context.session_id, is_write=is_write
-            )
-            if not allowed:
-                raise SecurityError(rate_msg, "rate_limited")
-
-            # 2. RBAC tool access check
-            rbac_msg = self._rbac.check_tool_access(
-                tool_name, context.user_groups, context.is_admin
-            )
-            if rbac_msg:
-                raise SecurityError(rbac_msg, "access_denied")
-
-            # 3. Model restriction check
-            if model:
-                restriction_msg = self._restrictions.check_model_access(
-                    model, operation, context.is_admin
-                )
-                if restriction_msg:
-                    raise SecurityError(restriction_msg, "model_restricted")
-
-            # 4. Method restriction check
-            if tool_name == "execute_method":
-                method = params.get("method", "")
-                if model and method:
-                    method_msg = self._restrictions.check_method_access(
-                        model, method, context.is_admin
-                    )
-                    if method_msg:
-                        raise SecurityError(method_msg, "method_restricted")
-
-            # 5. Field write checks
-            if is_write and model:
-                values = params.get("values", {})
-                if isinstance(values, dict):
-                    for field_name in list(values.keys()):
-                        field_msg = self._restrictions.check_field_write(
-                            model, field_name, context.is_admin
-                        )
-                        if field_msg:
-                            raise SecurityError(field_msg, "field_restricted")
-
-            # 6. Sanitize write values (RBAC field filtering)
-            if is_write and model:
-                values = params.get("values", {})
-                if isinstance(values, dict):
-                    params = dict(params)
-                    params["values"] = self._rbac.sanitize_write_values(
-                        values, model, context.user_groups, context.is_admin
-                    )
-
-            # 7. Execute handler
-            result = await handler(**params)
-
-            # 8. Filter response fields
-            if model and isinstance(result, list):
-                result = self._rbac.filter_response_fields(
-                    result, model, context.user_groups, context.is_admin
-                )
-
-            # 9. Audit success
-            duration_ms = (time.monotonic() - start) * 1000
-            entry = AuditLogger.create_entry(
-                session_id=context.session_id,
-                user_id=context.user_id,
-                user_login=context.user_login,
-                tool=tool_name,
-                model=model,
-                operation=operation,
-                args=params,
-                result="success",
-                duration_ms=duration_ms,
-            )
-            self._audit.log(entry)
-
-            return result
-
-        except SecurityError as sec_exc:
-            # Security errors: audit and re-raise as-is
-            duration_ms = (time.monotonic() - start) * 1000
-            entry = AuditLogger.create_entry(
-                session_id=context.session_id,
-                user_id=context.user_id,
-                user_login=context.user_login,
-                tool=tool_name,
-                model=model,
-                operation=operation,
-                args=params,
-                result="denied",
-                duration_ms=duration_ms,
-                error_message=str(sec_exc),
-            )
-            self._audit.log(entry)
-            raise
-
-        except Exception as exc:
-            # Unexpected errors: sanitize, audit, re-raise
-            duration_ms = (time.monotonic() - start) * 1000
-            safe_message = self._sanitizer.sanitize_exception(exc)
-            entry = AuditLogger.create_entry(
-                session_id=context.session_id,
-                user_id=context.user_id,
-                user_login=context.user_login,
-                tool=tool_name,
-                model=model,
-                operation=operation,
-                args=params,
-                result="error",
-                duration_ms=duration_ms,
-                error_message=safe_message,
-            )
-            self._audit.log(entry)
-            raise SecurityError(safe_message, "internal_error") from exc
 
 
 async def security_gate(

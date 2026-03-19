@@ -10,6 +10,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.core.security import security_gate
+from odoo_mcp_gateway.server import get_current_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +18,15 @@ _MODEL_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
 
 
 async def _resource_gate(ctx: Any, resource_name: str) -> str | None:
-    """Run security gate for resource access (rate limit + RBAC + audit)."""
+    """Run security gate for resource access (rate limit + RBAC + audit).
+
+    Returns an error string if access should be denied, or None if OK.
+    """
     if not hasattr(ctx, "auth_managers") or not ctx.auth_managers:
-        return None
-    session_key = next(iter(ctx.auth_managers.keys()), "default")
+        return "Not authenticated. Please call the login tool first."
+    session_key = get_current_session_key() or next(
+        iter(ctx.auth_managers.keys()), "default"
+    )
     return await security_gate(ctx, f"resource:{resource_name}", session_key)
 
 
@@ -314,7 +320,11 @@ def _get_client(ctx: Any) -> Any:
     """Get the active authenticated client from context."""
     if not ctx.auth_managers:
         return None
-    auth_mgr = next(iter(ctx.auth_managers.values()))
+    key = get_current_session_key()
+    if key is not None and key in ctx.auth_managers:
+        auth_mgr = ctx.auth_managers[key]
+    else:
+        auth_mgr = next(iter(ctx.auth_managers.values()))
     try:
         return auth_mgr.get_active_client()
     except Exception:
@@ -325,7 +335,11 @@ def _get_auth_result(ctx: Any) -> Any:
     """Get the current auth result from context."""
     if not ctx.auth_managers:
         return None
-    auth_mgr = next(iter(ctx.auth_managers.values()))
+    key = get_current_session_key()
+    if key is not None and key in ctx.auth_managers:
+        auth_mgr = ctx.auth_managers[key]
+    else:
+        auth_mgr = next(iter(ctx.auth_managers.values()))
     return getattr(auth_mgr, "auth_result", None)
 
 

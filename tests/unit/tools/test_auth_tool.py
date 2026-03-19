@@ -308,3 +308,86 @@ class TestLoginValidation:
 
         assert "error" in resp
         assert resp["error"]  # sanitized error message returned
+
+
+# ------------------------------------------------------------------
+# Auth input validation tests
+# ------------------------------------------------------------------
+
+
+class TestAuthInputValidation:
+    """Verify credential length validation in the login tool."""
+
+    async def test_username_too_long_returns_error(self) -> None:
+        """Username longer than 256 chars should be rejected."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        long_username = "a" * 257
+        resp = await login_fn(
+            method="password",
+            credential="password123",
+            username=long_username,
+            database="testdb",
+        )
+
+        assert "error" in resp
+        assert "Username too long" in resp["error"]
+
+    async def test_credential_too_long_returns_error(self) -> None:
+        """Credential longer than 4096 chars should be rejected."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        long_credential = "x" * 4097
+        resp = await login_fn(
+            method="api_key",
+            credential=long_credential,
+            username="admin",
+            database="testdb",
+        )
+
+        assert "error" in resp
+        assert "Credential too long" in resp["error"]
+
+    async def test_username_at_max_length_is_accepted(self) -> None:
+        """Username exactly at 256 chars should be accepted (not rejected)."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        max_username = "a" * 256
+        result = _auth_result(uid=5, username=max_username)
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_auth_cls:
+            instance = mock_auth_cls.return_value
+            instance.login = AsyncMock(return_value=result)
+
+            resp = await login_fn(
+                method="password",
+                credential="pass",
+                username=max_username,
+                database="testdb",
+            )
+
+        # Should NOT be an error -- length is exactly at the limit
+        assert "error" not in resp or "too long" not in resp.get("error", "").lower()
+
+    async def test_credential_at_max_length_is_accepted(self) -> None:
+        """Credential exactly at 4096 chars should be accepted (not rejected)."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        max_credential = "x" * 4096
+        result = _auth_result(uid=5)
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_auth_cls:
+            instance = mock_auth_cls.return_value
+            instance.login = AsyncMock(return_value=result)
+
+            resp = await login_fn(
+                method="api_key",
+                credential=max_credential,
+                username="admin",
+                database="testdb",
+            )
+
+        # Should NOT be an error -- length is exactly at the limit
+        assert "error" not in resp or "too long" not in resp.get("error", "").lower()

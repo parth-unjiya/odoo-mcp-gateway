@@ -449,3 +449,144 @@ class TestSalesRestrictionEnforcement:
         result = await captured["confirm_order"](order_id=1)
         assert "error" in result
         assert "denied" in result["error"].lower()
+
+
+# ── IDOR Protection tests ──────────────────────────────────────
+
+
+def _make_idor_context(*, uid: int, is_admin: bool):
+    """Create a mock context with explicit admin/non-admin settings."""
+    ctx = MagicMock()
+    client = AsyncMock()
+    auth_mgr = MagicMock()
+    auth_mgr.get_active_client.return_value = client
+    auth_mgr.auth_result = MagicMock(
+        uid=uid,
+        is_admin=is_admin,
+        groups=["base.group_system" if is_admin else "base.group_user"],
+    )
+    ctx.auth_managers = {"session": auth_mgr}
+    ctx.sanitize_error = lambda exc: str(exc)
+    ctx.rate_limiter = None
+    ctx.audit_logger = None
+    ctx.rbac.check_tool_access.return_value = None
+    return ctx, client
+
+
+def _register_sales(ctx):
+    """Register Sales plugin on a mock server and return captured tools."""
+    server = MagicMock()
+    captured: dict = {}
+
+    def fake_tool():
+        def decorator(func):
+            captured[func.__name__] = func
+            return func
+
+        return decorator
+
+    server.tool = fake_tool
+    plugin = SalesPlugin()
+    plugin.register(server, ctx)
+    return captured
+
+
+@pytest.fixture
+def nonadmin_sales_context():
+    return _make_idor_context(uid=42, is_admin=False)
+
+
+@pytest.fixture
+def admin_sales_context():
+    return _make_idor_context(uid=1, is_admin=True)
+
+
+@pytest.fixture
+def nonadmin_sales_tools(nonadmin_sales_context):
+    ctx, _ = nonadmin_sales_context
+    return _register_sales(ctx)
+
+
+@pytest.fixture
+def admin_sales_tools(admin_sales_context):
+    ctx, _ = admin_sales_context
+    return _register_sales(ctx)
+
+
+class TestIDORProtection:
+    """Verify user_id scoping prevents cross-user access."""
+
+    async def test_nonadmin_get_order_details_includes_user_id_in_domain(
+        self, nonadmin_sales_tools, nonadmin_sales_context
+    ):
+        """Non-admin get_order_details must include user_id filter in domain."""
+        _, client = nonadmin_sales_context
+        client.execute_kw.side_effect = [
+            [{"id": 1, "name": "S00001", "partner_id": [1, "C"],
+              "date_order": "2025-01-01", "amount_untaxed": 100,
+              "amount_tax": 10, "amount_total": 110, "state": "sale",
+              "currency_id": [1, "USD"], "user_id": [42, "User"], "note": ""}],
+            [],  # order lines
+        ]
+        await nonadmin_sales_tools["get_order_details"](order_id=1)
+        # First execute_kw call is the order search
+        call_args = client.execute_kw.call_args_list[0]
+        domain = call_args[0][2][0]
+        assert ["user_id", "=", 42] in domain
+
+    async def test_admin_get_order_details_does_not_include_user_id_in_domain(
+        self, admin_sales_tools, admin_sales_context
+    ):
+        """Admin get_order_details must NOT include user_id filter in domain."""
+        _, client = admin_sales_context
+        client.execute_kw.side_effect = [
+            [{"id": 1, "name": "S00001", "partner_id": [1, "C"],
+              "date_order": "2025-01-01", "amount_untaxed": 100,
+              "amount_tax": 10, "amount_total": 110, "state": "sale",
+              "currency_id": [1, "USD"], "user_id": [1, "Admin"], "note": ""}],
+            [],  # order lines
+        ]
+        await admin_sales_tools["get_order_details"](order_id=1)
+        call_args = client.execute_kw.call_args_list[0]
+        domain = call_args[0][2][0]
+        assert ["id", "=", 1] in domain
+        # user_id filter must NOT be present for admin
+        user_id_entries = [
+            d for d in domain
+            if isinstance(d, list) and d[0] == "user_id"
+        ]
+        assert len(user_id_entries) == 0
+
+    async def test_nonadmin_confirm_order_includes_user_id_in_domain(
+        self, nonadmin_sales_tools, nonadmin_sales_context
+    ):
+        """Non-admin confirm_order must include user_id filter in domain."""
+        _, client = nonadmin_sales_context
+        client.execute_kw.side_effect = [
+            [{"id": 1, "name": "S00001", "state": "draft"}],
+            True,  # action_confirm
+        ]
+        await nonadmin_sales_tools["confirm_order"](order_id=1)
+        # First execute_kw call is the order verification search
+        call_args = client.execute_kw.call_args_list[0]
+        domain = call_args[0][2][0]
+        assert ["user_id", "=", 42] in domain
+
+    async def test_admin_confirm_order_does_not_include_user_id_in_domain(
+        self, admin_sales_tools, admin_sales_context
+    ):
+        """Admin confirm_order must NOT include user_id filter in domain."""
+        _, client = admin_sales_context
+        client.execute_kw.side_effect = [
+            [{"id": 1, "name": "S00001", "state": "draft"}],
+            True,  # action_confirm
+        ]
+        await admin_sales_tools["confirm_order"](order_id=1)
+        call_args = client.execute_kw.call_args_list[0]
+        domain = call_args[0][2][0]
+        assert ["id", "=", 1] in domain
+        user_id_entries = [
+            d for d in domain
+            if isinstance(d, list) and d[0] == "user_id"
+        ]
+        assert len(user_id_entries) == 0

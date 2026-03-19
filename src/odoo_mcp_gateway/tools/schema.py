@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.core.security import security_gate
-from odoo_mcp_gateway.server import _get_auth_manager, _get_client
+from odoo_mcp_gateway.server import (
+    _get_auth_manager,
+    _get_client,
+    get_current_session_key,
+)
 from odoo_mcp_gateway.tools.crud import _validate_model
 
 if TYPE_CHECKING:
@@ -33,7 +37,9 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
             auth_result = auth_mgr.auth_result
             is_admin = auth_result.is_admin if auth_result else False
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "list_models", session_key)
             if gate_error:
                 return {"error": gate_error}
@@ -94,7 +100,9 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
             is_admin = auth_result.is_admin if auth_result else False
             user_groups = auth_result.groups if auth_result else []
 
-            session_key = next(iter(gateway.auth_managers.keys()), "default")
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
             gate_error = await security_gate(gateway, "get_model_fields", session_key)
             if gate_error:
                 return {"error": gate_error}

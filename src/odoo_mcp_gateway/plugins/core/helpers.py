@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from odoo_mcp_gateway.core.security import security_gate
+from odoo_mcp_gateway.server import get_current_session_key
 
 
 async def check_security_gate(context: Any, tool_name: str) -> str | None:
@@ -13,7 +14,9 @@ async def check_security_gate(context: Any, tool_name: str) -> str | None:
 
     Returns None if allowed, error string if blocked.
     """
-    session_key = next(iter(context.auth_managers.keys()), "default")
+    session_key = get_current_session_key() or next(
+        iter(context.auth_managers.keys()), "default"
+    )
     return await security_gate(context, tool_name, session_key)
 
 
@@ -21,7 +24,11 @@ def get_client(context: Any) -> Any:
     """Extract the active Odoo client from the gateway context."""
     if not context.auth_managers:
         return None
-    mgr = next(iter(context.auth_managers.values()))
+    key = get_current_session_key()
+    if key is not None and key in context.auth_managers:
+        mgr = context.auth_managers[key]
+    else:
+        mgr = next(iter(context.auth_managers.values()))
     try:
         return mgr.get_active_client()
     except Exception:
@@ -32,7 +39,11 @@ def get_uid(context: Any) -> int:
     """Extract the current user ID from the gateway context."""
     if not context.auth_managers:
         return 0
-    mgr = next(iter(context.auth_managers.values()))
+    key = get_current_session_key()
+    if key is not None and key in context.auth_managers:
+        mgr = context.auth_managers[key]
+    else:
+        mgr = next(iter(context.auth_managers.values()))
     result = getattr(mgr, "auth_result", None)
     return getattr(result, "uid", 0) if result else 0
 
@@ -41,7 +52,11 @@ def get_auth_info(context: Any) -> tuple[bool, list[str]]:
     """Extract admin status and group list from context."""
     if not context.auth_managers:
         return False, []
-    mgr = next(iter(context.auth_managers.values()))
+    key = get_current_session_key()
+    if key is not None and key in context.auth_managers:
+        mgr = context.auth_managers[key]
+    else:
+        mgr = next(iter(context.auth_managers.values()))
     result = getattr(mgr, "auth_result", None)
     if result is None:
         return False, []

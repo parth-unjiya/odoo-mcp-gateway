@@ -13,6 +13,7 @@ from odoo_mcp_gateway.client.xmlrpc import XmlRpcClient
 from odoo_mcp_gateway.core.auth.manager import AuthManager
 from odoo_mcp_gateway.core.security import security_gate
 from odoo_mcp_gateway.core.version.detector import detect_version
+from odoo_mcp_gateway.server import set_current_session_key
 
 if TYPE_CHECKING:
     from odoo_mcp_gateway.server import GatewayContext
@@ -90,6 +91,8 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 except Exception:
                     logger.debug("Failed to close old auth manager")
             gateway.auth_managers[session_key] = auth_mgr
+            auth_mgr.register_session(session_key)
+            set_current_session_key(session_key)
 
             # Detect Odoo version after successful authentication
             version_info = None
