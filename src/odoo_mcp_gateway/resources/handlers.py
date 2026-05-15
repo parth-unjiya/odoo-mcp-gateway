@@ -276,9 +276,7 @@ def register_resources(server: FastMCP, get_context: Any) -> None:
             return json.dumps({"error": "Invalid model name"})
 
         if not hasattr(ctx, "workflow_registry"):
-            return json.dumps(
-                {"error": "Workflow engine not available"}
-            )
+            return json.dumps({"error": "Workflow engine not available"})
 
         wf_dict = ctx.workflow_registry.to_dict(model_name)
         if wf_dict is None:

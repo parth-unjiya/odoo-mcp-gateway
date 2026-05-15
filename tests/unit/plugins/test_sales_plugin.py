@@ -522,10 +522,21 @@ class TestIDORProtection:
         """Non-admin get_order_details must include user_id filter in domain."""
         _, client = nonadmin_sales_context
         client.execute_kw.side_effect = [
-            [{"id": 1, "name": "S00001", "partner_id": [1, "C"],
-              "date_order": "2025-01-01", "amount_untaxed": 100,
-              "amount_tax": 10, "amount_total": 110, "state": "sale",
-              "currency_id": [1, "USD"], "user_id": [42, "User"], "note": ""}],
+            [
+                {
+                    "id": 1,
+                    "name": "S00001",
+                    "partner_id": [1, "C"],
+                    "date_order": "2025-01-01",
+                    "amount_untaxed": 100,
+                    "amount_tax": 10,
+                    "amount_total": 110,
+                    "state": "sale",
+                    "currency_id": [1, "USD"],
+                    "user_id": [42, "User"],
+                    "note": "",
+                }
+            ],
             [],  # order lines
         ]
         await nonadmin_sales_tools["get_order_details"](order_id=1)
@@ -540,10 +551,21 @@ class TestIDORProtection:
         """Admin get_order_details must NOT include user_id filter in domain."""
         _, client = admin_sales_context
         client.execute_kw.side_effect = [
-            [{"id": 1, "name": "S00001", "partner_id": [1, "C"],
-              "date_order": "2025-01-01", "amount_untaxed": 100,
-              "amount_tax": 10, "amount_total": 110, "state": "sale",
-              "currency_id": [1, "USD"], "user_id": [1, "Admin"], "note": ""}],
+            [
+                {
+                    "id": 1,
+                    "name": "S00001",
+                    "partner_id": [1, "C"],
+                    "date_order": "2025-01-01",
+                    "amount_untaxed": 100,
+                    "amount_tax": 10,
+                    "amount_total": 110,
+                    "state": "sale",
+                    "currency_id": [1, "USD"],
+                    "user_id": [1, "Admin"],
+                    "note": "",
+                }
+            ],
             [],  # order lines
         ]
         await admin_sales_tools["get_order_details"](order_id=1)
@@ -552,8 +574,7 @@ class TestIDORProtection:
         assert ["id", "=", 1] in domain
         # user_id filter must NOT be present for admin
         user_id_entries = [
-            d for d in domain
-            if isinstance(d, list) and d[0] == "user_id"
+            d for d in domain if isinstance(d, list) and d[0] == "user_id"
         ]
         assert len(user_id_entries) == 0
 
@@ -586,7 +607,6 @@ class TestIDORProtection:
         domain = call_args[0][2][0]
         assert ["id", "=", 1] in domain
         user_id_entries = [
-            d for d in domain
-            if isinstance(d, list) and d[0] == "user_id"
+            d for d in domain if isinstance(d, list) and d[0] == "user_id"
         ]
         assert len(user_id_entries) == 0

@@ -210,9 +210,7 @@ class TestCreateTicket:
 class TestGetMyTicketsStateValidation:
     """Verify the state filter input is validated before reaching Odoo."""
 
-    async def test_invalid_state_with_special_chars_rejected(
-        self, tools, mock_context
-    ):
+    async def test_invalid_state_with_special_chars_rejected(self, tools, mock_context):
         """SQL-injection-like payloads must be rejected without hitting Odoo."""
         _, client = mock_context
         result = await tools["get_my_tickets"](state="'; DROP TABLE--")
@@ -268,9 +266,7 @@ class TestGetMyTicketsStateValidation:
         result = await tools["get_my_tickets"](state="Pending-Review")
         assert "error" not in result
 
-    async def test_invalid_state_with_unicode_quote_rejected(
-        self, tools, mock_context
-    ):
+    async def test_invalid_state_with_unicode_quote_rejected(self, tools, mock_context):
         """Smart quotes and other non-allowed chars are rejected."""
         _, client = mock_context
         result = await tools["get_my_tickets"](state="New’")
@@ -287,6 +283,7 @@ class TestCreateTicketUserIdSanitization:
     async def test_user_id_drop_returns_error(self, tools, mock_context):
         """If RBAC strips user_id from the write values, fail loudly."""
         ctx, client = mock_context
+
         # Simulate an RBAC policy that removes user_id from helpdesk.ticket
         # writes for this user.
         def _strip_user_id(values, model, user_groups, is_admin):
@@ -452,7 +449,6 @@ class TestIDORProtection:
         assert ["id", "=", 5] in domain
         # user_id filter must NOT be present for admin
         user_id_entries = [
-            d for d in domain
-            if isinstance(d, list) and d[0] == "user_id"
+            d for d in domain if isinstance(d, list) and d[0] == "user_id"
         ]
         assert len(user_id_entries) == 0

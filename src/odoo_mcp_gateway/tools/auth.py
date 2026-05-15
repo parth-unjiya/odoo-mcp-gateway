@@ -140,13 +140,9 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
                         if isinstance(installed_raw, list)
                         else []
                     )
-                    await gateway.plugin_registry.check_requirements(
-                        installed_names
-                    )
+                    await gateway.plugin_registry.check_requirements(installed_names)
             except Exception:
-                logger.debug(
-                    "Plugin requirements check failed", exc_info=True
-                )
+                logger.debug("Plugin requirements check failed", exc_info=True)
 
             gateway.login_rate_limiter.record_success(username)
             gateway.login_ip_rate_limiter.record_success(source_id)

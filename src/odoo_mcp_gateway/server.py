@@ -187,8 +187,7 @@ def _sync_cleanup(gateway: GatewayContext) -> None:
             loop.run_until_complete(gateway.cleanup())
     except RuntimeError:
         logger.warning(
-            "No event loop available at shutdown; "
-            "%d auth session(s) were not closed",
+            "No event loop available at shutdown; %d auth session(s) were not closed",
             len(gateway.auth_managers),
         )
 

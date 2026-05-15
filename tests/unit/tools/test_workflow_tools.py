@@ -182,9 +182,7 @@ class TestGetCreateRequirements:
         )
 
         tools = _get_tools(gateway)
-        resp = await tools["get_create_requirements"](
-            model="ir.config_parameter"
-        )
+        resp = await tools["get_create_requirements"](model="ir.config_parameter")
 
         assert "error" in resp
         assert "always blocked" in resp["error"]
@@ -324,18 +322,14 @@ class TestGetRecordActions:
         )
 
     async def test_returns_actions_for_draft_sale_order(self) -> None:
-        mock_client = make_mock_client(
-            execute_kw_return=[{"id": 1, "state": "draft"}]
-        )
+        mock_client = make_mock_client(execute_kw_return=[{"id": 1, "state": "draft"}])
         gateway = make_gateway(
             mock_client=mock_client,
             model_access_config=self._sale_order_access(),
         )
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         assert "error" not in resp
         assert resp["model"] == "sale.order"
@@ -349,18 +343,14 @@ class TestGetRecordActions:
         assert "action_confirm" in action_methods
 
     async def test_returns_actions_for_sale_state(self) -> None:
-        mock_client = make_mock_client(
-            execute_kw_return=[{"id": 1, "state": "sale"}]
-        )
+        mock_client = make_mock_client(execute_kw_return=[{"id": 1, "state": "sale"}])
         gateway = make_gateway(
             mock_client=mock_client,
             model_access_config=self._sale_order_access(),
         )
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         assert resp["current_state"] == "sale"
         assert resp["current_state_label"] == "Sales Order"
@@ -368,18 +358,14 @@ class TestGetRecordActions:
         assert "action_done" in action_methods
 
     async def test_done_state_has_no_actions(self) -> None:
-        mock_client = make_mock_client(
-            execute_kw_return=[{"id": 1, "state": "done"}]
-        )
+        mock_client = make_mock_client(execute_kw_return=[{"id": 1, "state": "done"}])
         gateway = make_gateway(
             mock_client=mock_client,
             model_access_config=self._sale_order_access(),
         )
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         assert resp["current_state"] == "done"
         assert resp["actions"] == []
@@ -389,9 +375,7 @@ class TestGetRecordActions:
         gateway = make_gateway(mock_client=mock_client)
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="res.partner", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="res.partner", record_id=1)
 
         assert resp["has_workflow"] is False
         assert "message" in resp
@@ -401,9 +385,7 @@ class TestGetRecordActions:
         gateway = make_gateway(mock_client=mock_client)
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=999
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=999)
 
         assert "error" in resp
         assert "not found" in resp["error"]
@@ -412,9 +394,7 @@ class TestGetRecordActions:
         gateway = make_gateway()
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=0
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=0)
 
         assert "error" in resp
         assert "positive" in resp["error"]
@@ -423,9 +403,7 @@ class TestGetRecordActions:
         gateway = make_gateway()
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=-1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=-1)
 
         assert "error" in resp
 
@@ -434,9 +412,7 @@ class TestGetRecordActions:
         gateway.auth_managers.clear()
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         assert "error" in resp
         assert "Not authenticated" in resp["error"]
@@ -465,9 +441,7 @@ class TestGetRecordActions:
         )
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         assert resp["has_workflow"] is True
         assert resp["current_state"] == "unknown_state"
@@ -504,9 +478,7 @@ class TestGetRecordActions:
         )
 
         tools = _get_tools(gateway, registry=registry)
-        resp = await tools["get_record_actions"](
-            model="crm.lead", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="crm.lead", record_id=1)
 
         assert resp["has_workflow"] is True
         assert resp.get("stage_based") is True
@@ -516,9 +488,7 @@ class TestGetRecordActions:
 
     async def test_actions_filtered_by_method_restrictions(self) -> None:
         """Methods blocked by restriction checker should not appear."""
-        mock_client = make_mock_client(
-            execute_kw_return=[{"id": 1, "state": "draft"}]
-        )
+        mock_client = make_mock_client(execute_kw_return=[{"id": 1, "state": "draft"}])
         gateway = make_gateway(
             mock_client=mock_client,
             model_access_config=ModelAccessConfig(
@@ -532,9 +502,7 @@ class TestGetRecordActions:
         )
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         action_methods = [a["method"] for a in resp["actions"]]
         # action_confirm is not in allowed_methods, so non-admin can't see it
@@ -543,9 +511,7 @@ class TestGetRecordActions:
 
     async def test_admin_sees_all_actions(self) -> None:
         """Admin should see all actions even without explicit allowed_methods."""
-        mock_client = make_mock_client(
-            execute_kw_return=[{"id": 1, "state": "draft"}]
-        )
+        mock_client = make_mock_client(execute_kw_return=[{"id": 1, "state": "draft"}])
         gateway = make_gateway(
             mock_client=mock_client,
             is_admin=True,
@@ -556,24 +522,18 @@ class TestGetRecordActions:
         )
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         action_methods = [a["method"] for a in resp["actions"]]
         assert "action_confirm" in action_methods
         assert "action_cancel" in action_methods
 
     async def test_action_has_required_keys(self) -> None:
-        mock_client = make_mock_client(
-            execute_kw_return=[{"id": 1, "state": "draft"}]
-        )
+        mock_client = make_mock_client(execute_kw_return=[{"id": 1, "state": "draft"}])
         gateway = make_gateway(mock_client=mock_client, is_admin=True)
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="sale.order", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="sale.order", record_id=1)
 
         for action in resp["actions"]:
             assert "method" in action
@@ -585,8 +545,6 @@ class TestGetRecordActions:
         gateway = make_gateway()
 
         tools = _get_tools(gateway)
-        resp = await tools["get_record_actions"](
-            model="INVALID!", record_id=1
-        )
+        resp = await tools["get_record_actions"](model="INVALID!", record_id=1)
 
         assert "error" in resp

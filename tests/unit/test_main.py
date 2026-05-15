@@ -54,9 +54,7 @@ class TestMainStdio:
 class TestMainStreamableHTTP:
     @patch("odoo_mcp_gateway.__main__.create_server")
     @patch("odoo_mcp_gateway.__main__.Settings")
-    def test_main_streamable_http_transport(
-        self, mock_settings, mock_create_server
-    ):
+    def test_main_streamable_http_transport(self, mock_settings, mock_create_server):
         """main() with streamable-http transport uses that transport."""
         settings = MagicMock()
         settings.mcp_transport = "streamable-http"
@@ -188,9 +186,7 @@ class TestLoggerMessages:
 
         mock_logger.info.assert_called_once()
         log_args = mock_logger.info.call_args
-        assert "transport" in log_args[0][0].lower() or (
-            "transport" in str(log_args)
-        )
+        assert "transport" in log_args[0][0].lower() or ("transport" in str(log_args))
 
     @patch("odoo_mcp_gateway.__main__.create_server")
     @patch("odoo_mcp_gateway.__main__.Settings")

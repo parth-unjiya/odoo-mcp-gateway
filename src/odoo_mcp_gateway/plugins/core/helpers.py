@@ -92,8 +92,7 @@ def format_model_error(
         )
         if alternate_models:
             message += (
-                " — try checking alternate model names: "
-                f"{', '.join(alternate_models)}"
+                f" — try checking alternate model names: {', '.join(alternate_models)}"
             )
         return message
     return None

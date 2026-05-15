@@ -361,7 +361,6 @@ class TestIDORProtection:
         assert ["id", "=", 10] in domain
         # user_ids filter must NOT be present for admin
         user_ids_entries = [
-            d for d in domain
-            if isinstance(d, list) and d[0] == "user_ids"
+            d for d in domain if isinstance(d, list) and d[0] == "user_ids"
         ]
         assert len(user_ids_entries) == 0

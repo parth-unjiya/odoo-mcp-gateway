@@ -30,10 +30,7 @@ def get_workflow() -> WorkflowDef:
                         action="action_confirm",
                         target_state="confirm",
                         label="Confirm",
-                        description=(
-                            "Submits the leave request for manager "
-                            "approval."
-                        ),
+                        description=("Submits the leave request for manager approval."),
                     ),
                 ),
             ),
@@ -61,10 +58,7 @@ def get_workflow() -> WorkflowDef:
                         action="action_draft",
                         target_state="draft",
                         label="Reset to Draft",
-                        description=(
-                            "Resets the request back to draft for "
-                            "editing."
-                        ),
+                        description=("Resets the request back to draft for editing."),
                     ),
                 ),
             ),
@@ -113,8 +107,7 @@ def get_workflow() -> WorkflowDef:
                         target_state="draft",
                         label="Reset to Draft",
                         description=(
-                            "Resets a refused request back to draft "
-                            "for re-submission."
+                            "Resets a refused request back to draft for re-submission."
                         ),
                     ),
                 ),

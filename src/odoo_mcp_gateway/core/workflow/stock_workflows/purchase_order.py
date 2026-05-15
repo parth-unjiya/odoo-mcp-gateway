@@ -99,8 +99,7 @@ def get_workflow() -> WorkflowDef:
                         target_state="draft",
                         label="Set to Draft",
                         description=(
-                            "Resets a cancelled order back to draft "
-                            "RFQ state."
+                            "Resets a cancelled order back to draft RFQ state."
                         ),
                     ),
                 ),

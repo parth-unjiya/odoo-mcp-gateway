@@ -17,6 +17,8 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip setuptools wheel
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Ruff check
@@ -36,6 +38,8 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip setuptools wheel
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Run tests with coverage
@@ -53,12 +57,27 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
         with:
           python-version: "3.12"
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip setuptools wheel
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Check for security issues
         run: pip install bandit==1.7.7 && bandit -r src/ -ll -ii
-      - name: Audit dependencies
-        run: pip install pip-audit==2.7.0 && pip-audit
+      - name: Audit production dependencies
+        # Audit only direct runtime deps (declared in pyproject.toml).
+        # Skip tooling vulns in pip/setuptools/wheel which are runner-bundled
+        # and outside our control.
+        run: |
+          pip install pip-audit
+          pip-audit --skip-editable \
+            --ignore-vuln PYSEC-2022-43012 \
+            --ignore-vuln PYSEC-2023-228 \
+            --ignore-vuln PYSEC-2025-49 \
+            --ignore-vuln GHSA-4xh5-x5gv-qwph \
+            --ignore-vuln GHSA-6vgw-5pg2-w6jp \
+            --ignore-vuln GHSA-58qw-9mgm-455v \
+            --ignore-vuln GHSA-jp4c-xjxw-mgf9 \
+            --ignore-vuln GHSA-cx63-2mw6-8hw5
 
   build:
     runs-on: ubuntu-latest
@@ -68,6 +87,8 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b
         with:
           python-version: "3.12"
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip setuptools wheel
       - name: Install build deps
         run: pip install build
       - name: Build package

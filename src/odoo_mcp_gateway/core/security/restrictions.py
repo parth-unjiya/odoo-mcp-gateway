@@ -28,20 +28,20 @@ _ALWAYS_BLOCKED_METHODS: frozenset[str] = frozenset(
         "_table_query",
         "_read_group_raw",
         # Bulk import/export — bypass field-level RBAC and validations
-        "name_create",        # creates records bypassing many validations
-        "load",               # bulk CSV-like load that can write any field
-        "import_data",        # bulk import path bypassing ORM guards
-        "export_data",        # bulk export path bypassing field RBAC
+        "name_create",  # creates records bypassing many validations
+        "load",  # bulk CSV-like load that can write any field
+        "import_data",  # bulk import path bypassing ORM guards
+        "export_data",  # bulk export path bypassing field RBAC
         # Cache poisoning vectors (Odoo 16+)
-        "flush_recordset",    # forces cache flush, can affect concurrent ops
+        "flush_recordset",  # forces cache flush, can affect concurrent ops
         "invalidate_recordset",  # cache invalidation; reachable side-effects
         # Internal search-panel helpers (Odoo 14+) — leak data via aggregates
         "_search_panel_select_range",
         "_search_panel_select_multi_range",
         "_search_panel_domain_image",
         # Underscored search/aggregation internals
-        "_search",            # internal search bypassing public search filters
-        "_read_progress_bar", # progress-bar aggregation can leak counts
+        "_search",  # internal search bypassing public search filters
+        "_read_progress_bar",  # progress-bar aggregation can leak counts
     }
 )
 
@@ -260,8 +260,7 @@ class RestrictionChecker:
         if model in self._allowed_methods:
             if method not in self._allowed_methods[model] and not is_admin:
                 return (
-                    f"Method '{method}' is not in the allowed list "
-                    f"for model '{model}'"
+                    f"Method '{method}' is not in the allowed list for model '{model}'"
                 )
         elif not is_admin and not method.startswith("_"):
             # Public method on a model with no allowed_methods entry — block

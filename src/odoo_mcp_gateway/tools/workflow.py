@@ -167,9 +167,7 @@ def register_workflow_tools(
             session_key = get_current_session_key() or next(
                 iter(gateway.auth_managers.keys()), "default"
             )
-            gate_error = await security_gate(
-                gateway, "get_record_actions", session_key
-            )
+            gate_error = await security_gate(gateway, "get_record_actions", session_key)
             if gate_error:
                 return {"error": gate_error}
 
@@ -217,7 +215,11 @@ def register_workflow_tools(
                 # Stage-based: we cannot map to our static states directly,
                 # so return all known actions
                 return _build_stage_based_response(
-                    wf, model, record_id, raw_state, current_state_display,
+                    wf,
+                    model,
+                    record_id,
+                    raw_state,
+                    current_state_display,
                     is_admin,
                 )
 
@@ -241,9 +243,7 @@ def register_workflow_tools(
                 }
 
             # Build available actions, filtering by restrictions
-            actions = _filter_transitions(
-                wf, state_def.transitions, model, is_admin
-            )
+            actions = _filter_transitions(wf, state_def.transitions, model, is_admin)
 
             return {
                 "model": model,
@@ -279,9 +279,7 @@ def register_workflow_tools(
                     seen_actions.add(t.action)
                     all_transitions.append(t)
 
-        actions = _filter_transitions(
-            wf, tuple(all_transitions), model, is_admin
-        )
+        actions = _filter_transitions(wf, tuple(all_transitions), model, is_admin)
 
         return {
             "model": model,
@@ -316,19 +314,23 @@ def register_workflow_tools(
             if method_msg:
                 continue
 
-            actions.append({
-                "method": t.action,
-                "label": t.label,
-                "description": t.description,
-                "target_state": t.target_state,
-            })
+            actions.append(
+                {
+                    "method": t.action,
+                    "label": t.label,
+                    "description": t.description,
+                    "target_state": t.target_state,
+                }
+            )
 
         return actions
 
     # Register operation types for security middleware
     from odoo_mcp_gateway.core.security import register_tool_operations
 
-    register_tool_operations({
-        "get_create_requirements": "read",
-        "get_record_actions": "read",
-    })
+    register_tool_operations(
+        {
+            "get_create_requirements": "read",
+            "get_record_actions": "read",
+        }
+    )

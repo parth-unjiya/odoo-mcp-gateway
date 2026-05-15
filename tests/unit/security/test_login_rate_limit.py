@@ -1,4 +1,5 @@
 """Tests for login brute force protection."""
+
 from __future__ import annotations
 
 import time

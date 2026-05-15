@@ -348,27 +348,21 @@ class TestPrivateMethodAdminGuard:
         self, checker: RestrictionChecker
     ) -> None:
         """Admin can call a private method that IS in allowed_methods."""
-        msg = checker.check_method_access(
-            "sale.order", "_internal_compute_safe", True
-        )
+        msg = checker.check_method_access("sale.order", "_internal_compute_safe", True)
         assert msg is None
 
     def test_private_method_allowed_when_explicitly_whitelisted_for_user(
         self, checker: RestrictionChecker
     ) -> None:
         """Non-admin can also call whitelisted private methods."""
-        msg = checker.check_method_access(
-            "sale.order", "_internal_compute_safe", False
-        )
+        msg = checker.check_method_access("sale.order", "_internal_compute_safe", False)
         assert msg is None
 
     def test_private_method_blocked_for_unlisted_model(
         self, checker: RestrictionChecker
     ) -> None:
         """Private method on a model with no allowed_methods entry — blocked."""
-        msg = checker.check_method_access(
-            "res.partner", "_compute_display_name", True
-        )
+        msg = checker.check_method_access("res.partner", "_compute_display_name", True)
         assert msg is not None
 
 

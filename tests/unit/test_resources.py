@@ -761,9 +761,7 @@ async def test_schema_resource_invalid_model_name() -> None:
     """schema_resource rejects invalid model names."""
     ctx = _FakeContext(auth_mgr=_make_auth_mgr())
     handlers = _register(ctx)
-    raw = await handlers["odoo://schema/{model_name}"](
-        model_name="INVALID MODEL!"
-    )
+    raw = await handlers["odoo://schema/{model_name}"](model_name="INVALID MODEL!")
     data = json.loads(raw)
     assert "error" in data
     assert "Invalid model name" in data["error"]
@@ -773,9 +771,7 @@ async def test_schema_resource_without_auth() -> None:
     """schema_resource returns error when not authenticated."""
     ctx = _FakeContext()
     handlers = _register(ctx)
-    raw = await handlers["odoo://schema/{model_name}"](
-        model_name="res.partner"
-    )
+    raw = await handlers["odoo://schema/{model_name}"](model_name="res.partner")
     data = json.loads(raw)
     assert "error" in data
     assert "Not authenticated" in data["error"]
@@ -854,9 +850,7 @@ async def test_model_detail_invalid_model_name() -> None:
     """model_detail_resource rejects invalid model names."""
     ctx = _FakeContext(auth_mgr=_make_auth_mgr())
     handlers = _register(ctx)
-    raw = await handlers["odoo://models/{model_name}"](
-        model_name="DROP TABLE users"
-    )
+    raw = await handlers["odoo://models/{model_name}"](model_name="DROP TABLE users")
     data = json.loads(raw)
     assert "error" in data
     assert "Invalid model name" in data["error"]

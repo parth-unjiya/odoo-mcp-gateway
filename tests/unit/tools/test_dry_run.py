@@ -43,13 +43,13 @@ class TestCreateRecordDryRun:
 
     async def test_dry_run_still_checks_restrictions(self) -> None:
         gateway = make_gateway(
-            restriction_config=RestrictionConfig(always_blocked=["ir.config_parameter"]),
+            restriction_config=RestrictionConfig(
+                always_blocked=["ir.config_parameter"]
+            ),
         )
         fn = _get_tool(gateway, "create_record")
 
-        resp = await fn(
-            model="ir.config_parameter", values={"key": "x"}, dry_run=True
-        )
+        resp = await fn(model="ir.config_parameter", values={"key": "x"}, dry_run=True)
 
         assert "error" in resp
         assert "always blocked" in resp["error"]
@@ -131,7 +131,9 @@ class TestUpdateRecordDryRun:
 
     async def test_dry_run_still_checks_restrictions(self) -> None:
         gateway = make_gateway(
-            restriction_config=RestrictionConfig(always_blocked=["ir.config_parameter"]),
+            restriction_config=RestrictionConfig(
+                always_blocked=["ir.config_parameter"]
+            ),
         )
         fn = _get_tool(gateway, "update_record")
 
@@ -166,9 +168,7 @@ class TestUpdateRecordDryRun:
         gateway = make_gateway(mock_client=mock_client)
         fn = _get_tool(gateway, "update_record")
 
-        resp = await fn(
-            model="res.partner", record_id=1, values={"name": "Updated"}
-        )
+        resp = await fn(model="res.partner", record_id=1, values={"name": "Updated"})
 
         assert resp["success"] is True
         mock_client.execute_kw.assert_called_once()
@@ -190,7 +190,9 @@ class TestDeleteRecordDryRun:
 
     async def test_dry_run_still_checks_restrictions(self) -> None:
         gateway = make_gateway(
-            restriction_config=RestrictionConfig(always_blocked=["ir.config_parameter"]),
+            restriction_config=RestrictionConfig(
+                always_blocked=["ir.config_parameter"]
+            ),
         )
         fn = _get_tool(gateway, "delete_record")
 
@@ -248,7 +250,9 @@ class TestExecuteMethodDryRun:
 
     async def test_dry_run_still_checks_restrictions(self) -> None:
         gateway = make_gateway(
-            restriction_config=RestrictionConfig(always_blocked=["ir.config_parameter"]),
+            restriction_config=RestrictionConfig(
+                always_blocked=["ir.config_parameter"]
+            ),
         )
         fn = _get_tool(gateway, "execute_method")
 

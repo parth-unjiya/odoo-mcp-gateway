@@ -156,19 +156,21 @@ def _validate_write_values(values: dict[str, Any]) -> None:
 # These are stripped from kwargs["context"] in execute_method to prevent
 # attackers from disabling archived-record filtering, audit logging,
 # mail tracking, or cross-company access boundaries.
-_DANGEROUS_CONTEXT_KEYS = frozenset({
-    "active_test",
-    "tracking_disable",
-    "mail_create_nolog",
-    "mail_create_nosubscribe",
-    "mail_notrack",
-    "force_company",
-    "allowed_company_ids",
-    "default_company_id",
-    "no_reset_password",
-    "import_compat",
-    "check_move_validity",
-})
+_DANGEROUS_CONTEXT_KEYS = frozenset(
+    {
+        "active_test",
+        "tracking_disable",
+        "mail_create_nolog",
+        "mail_create_nosubscribe",
+        "mail_notrack",
+        "force_company",
+        "allowed_company_ids",
+        "default_company_id",
+        "no_reset_password",
+        "import_compat",
+        "check_move_validity",
+    }
+)
 
 # ORM methods that are already exposed through dedicated CRUD tools.
 # Blocking them in execute_method prevents bypassing field-level checks.
@@ -1014,9 +1016,7 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 ctx = kwargs["context"]
                 if isinstance(ctx, dict):
                     stripped = {
-                        k: v
-                        for k, v in ctx.items()
-                        if k not in _DANGEROUS_CONTEXT_KEYS
+                        k: v for k, v in ctx.items() if k not in _DANGEROUS_CONTEXT_KEYS
                     }
                     kwargs = {**kwargs, "context": stripped}
 
@@ -1063,15 +1063,17 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
     # Register operation types for security middleware
     from odoo_mcp_gateway.core.security import register_tool_operations
 
-    register_tool_operations({
-        "search_read": "read",
-        "get_record": "read",
-        "search_count": "read",
-        "create_record": "create",
-        "update_record": "write",
-        "delete_record": "delete",
-        "read_group": "read",
-        "get_defaults": "read",
-        "get_onchange": "read",
-        "execute_method": "write",
-    })
+    register_tool_operations(
+        {
+            "search_read": "read",
+            "get_record": "read",
+            "search_count": "read",
+            "create_record": "create",
+            "update_record": "write",
+            "delete_record": "delete",
+            "read_group": "read",
+            "get_defaults": "read",
+            "get_onchange": "read",
+            "execute_method": "write",
+        }
+    )

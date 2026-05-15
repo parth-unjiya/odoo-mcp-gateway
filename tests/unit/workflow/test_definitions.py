@@ -130,9 +130,7 @@ class TestRelationHint:
         assert r.required is False
 
     def test_frozen(self) -> None:
-        r = RelationHint(
-            field_name="f", relation_model="m", hint="h"
-        )
+        r = RelationHint(field_name="f", relation_model="m", hint="h")
         with pytest.raises(AttributeError):
             r.field_name = "other"  # type: ignore[misc]
 
@@ -224,12 +222,8 @@ class TestWorkflowDef:
 
     def test_version_notes_default_factory(self) -> None:
         """Each instance should get its own dict."""
-        wf1 = WorkflowDef(
-            model="a", display_name="A", state_field="s", states={}
-        )
-        wf2 = WorkflowDef(
-            model="b", display_name="B", state_field="s", states={}
-        )
+        wf1 = WorkflowDef(model="a", display_name="A", state_field="s", states={})
+        wf2 = WorkflowDef(model="b", display_name="B", state_field="s", states={})
         assert wf1.version_notes is not wf2.version_notes
 
     def test_states_can_have_nested_transitions(self) -> None:

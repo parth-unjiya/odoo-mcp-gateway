@@ -218,6 +218,7 @@ class TestPluginToolDegradation:
             def decorator(func: Any) -> Any:
                 tools[func.__name__] = func
                 return func
+
             return decorator
 
         server.tool = capture_tool
@@ -245,6 +246,7 @@ class TestPluginToolDegradation:
             def decorator(func: Any) -> Any:
                 tools[func.__name__] = func
                 return func
+
             return decorator
 
         server.tool = capture_tool
@@ -271,6 +273,7 @@ class TestPluginToolDegradation:
             def decorator(func: Any) -> Any:
                 tools[func.__name__] = func
                 return func
+
             return decorator
 
         server.tool = capture_tool
@@ -297,6 +300,7 @@ class TestPluginToolDegradation:
             def decorator(func: Any) -> Any:
                 tools[func.__name__] = func
                 return func
+
             return decorator
 
         server.tool = capture_tool
@@ -321,6 +325,7 @@ class TestPluginToolDegradation:
             def decorator(func: Any) -> Any:
                 tools[func.__name__] = func
                 return func
+
             return decorator
 
         server.tool = capture_tool

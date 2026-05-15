@@ -183,7 +183,8 @@ class LoginRateLimiter:
         now = time.monotonic()
         # First pass: remove expired lockouts
         expired = [
-            k for k, (count, ts) in self._failures.items()
+            k
+            for k, (count, ts) in self._failures.items()
             if count >= self._max_failures and now - ts > self._lockout_seconds
         ]
         for k in expired:
@@ -191,9 +192,7 @@ class LoginRateLimiter:
 
         # Second pass: evict oldest if still over limit
         if len(self._failures) > self._max_entries:
-            sorted_keys = sorted(
-                self._failures, key=lambda k: self._failures[k][1]
-            )
+            sorted_keys = sorted(self._failures, key=lambda k: self._failures[k][1])
             for k in sorted_keys[: len(self._failures) - self._max_entries]:
                 del self._failures[k]
 
@@ -281,7 +280,8 @@ class LoginIpRateLimiter:
         now = time.monotonic()
         # First pass: remove expired lockouts
         expired = [
-            k for k, (count, ts) in self._failures.items()
+            k
+            for k, (count, ts) in self._failures.items()
             if count >= self._max_failures and now - ts > self._lockout_seconds
         ]
         for k in expired:
@@ -289,9 +289,7 @@ class LoginIpRateLimiter:
 
         # Second pass: evict oldest if still over limit
         if len(self._failures) > self._max_entries:
-            sorted_keys = sorted(
-                self._failures, key=lambda k: self._failures[k][1]
-            )
+            sorted_keys = sorted(self._failures, key=lambda k: self._failures[k][1])
             for k in sorted_keys[: len(self._failures) - self._max_entries]:
                 del self._failures[k]
 

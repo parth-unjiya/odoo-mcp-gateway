@@ -178,10 +178,7 @@ class TestExecuteMethodBlocked:
         )
 
         assert "error" in resp
-        assert (
-            "Private method" in resp["error"]
-            or "not whitelisted" in resp["error"]
-        )
+        assert "Private method" in resp["error"] or "not whitelisted" in resp["error"]
 
     async def test_private_method_admin_fails_when_not_whitelisted(self) -> None:
         """Admin is NOT a wildcard for underscore-prefixed methods.
@@ -204,10 +201,7 @@ class TestExecuteMethodBlocked:
         )
 
         assert "error" in resp
-        assert (
-            "Private method" in resp["error"]
-            or "not whitelisted" in resp["error"]
-        )
+        assert "Private method" in resp["error"] or "not whitelisted" in resp["error"]
 
     async def test_private_method_non_admin_succeeds_when_whitelisted(self) -> None:
         """Whitelisted private methods are callable by non-admin users."""

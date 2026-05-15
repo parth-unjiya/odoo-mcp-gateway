@@ -392,18 +392,14 @@ class TestAllWorkflowIntegrity:
         for wf in all_workflows:
             assert len(wf.states) >= 2, f"{wf.model} has fewer than 2 states"
 
-    def test_all_have_create_guide(
-        self, all_workflows: list[WorkflowDef]
-    ) -> None:
+    def test_all_have_create_guide(self, all_workflows: list[WorkflowDef]) -> None:
         for wf in all_workflows:
             assert wf.create_guide is not None, f"{wf.model} has no create_guide"
 
     def test_no_empty_labels(self, all_workflows: list[WorkflowDef]) -> None:
         for wf in all_workflows:
             for state_def in wf.states.values():
-                assert state_def.label, (
-                    f"{wf.model}.{state_def.name} has no label"
-                )
+                assert state_def.label, f"{wf.model}.{state_def.name} has no label"
                 for t in state_def.transitions:
                     assert t.label, (
                         f"{wf.model}.{state_def.name}->{t.action} has no label"
@@ -414,17 +410,13 @@ class TestAllWorkflowIntegrity:
             for state_def in wf.states.values():
                 for t in state_def.transitions:
                     assert t.action, (
-                        f"{wf.model}.{state_def.name} has transition with "
-                        "no action"
+                        f"{wf.model}.{state_def.name} has transition with no action"
                     )
 
-    def test_no_empty_target_states(
-        self, all_workflows: list[WorkflowDef]
-    ) -> None:
+    def test_no_empty_target_states(self, all_workflows: list[WorkflowDef]) -> None:
         for wf in all_workflows:
             for state_def in wf.states.values():
                 for t in state_def.transitions:
                     assert t.target_state, (
-                        f"{wf.model}.{state_def.name}->{t.action} has no "
-                        "target_state"
+                        f"{wf.model}.{state_def.name}->{t.action} has no target_state"
                     )

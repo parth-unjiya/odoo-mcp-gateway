@@ -499,9 +499,7 @@ class TestMaxConcurrentSessions:
         managers = []
         for i in range(3):
             result = _auth_result(uid=i + 1)
-            mgr = _make_manager(
-                jsonrpc_auth=result, max_concurrent_sessions=3
-            )
+            mgr = _make_manager(jsonrpc_auth=result, max_concurrent_sessions=3)
             await mgr.login("password", "u", "p", "db")
             mgr.register_session(f"session_{i}")
             managers.append(mgr)

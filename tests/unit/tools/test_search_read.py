@@ -145,6 +145,7 @@ class TestSearchReadBasic:
         gateway = make_gateway(mock_client=mock_client)
         # Force field inspector to raise
         from unittest.mock import AsyncMock
+
         gateway.field_inspector.get_fields = AsyncMock(side_effect=RuntimeError("oops"))
         fn = _get_tool(gateway)
         resp = await fn(model="res.partner")

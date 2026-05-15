@@ -220,6 +220,7 @@ class AuthManager:
         """Strategy C: Reuse existing browser session cookie."""
         # Inject the session cookie and ask Odoo for session info.
         from odoo_mcp_gateway.client.base import Credential
+
         self._jsonrpc._session_id = Credential(session_id)  # noqa: SLF001
         try:
             info: dict[str, Any] = await self._jsonrpc._rpc(  # noqa: SLF001

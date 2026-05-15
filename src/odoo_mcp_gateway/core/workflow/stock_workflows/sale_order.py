@@ -72,8 +72,7 @@ def get_workflow() -> WorkflowDef:
                         target_state="done",
                         label="Lock",
                         description=(
-                            "Locks the sales order, preventing further "
-                            "modifications."
+                            "Locks the sales order, preventing further modifications."
                         ),
                     ),
                     TransitionDef(
@@ -98,8 +97,7 @@ def get_workflow() -> WorkflowDef:
                         target_state="draft",
                         label="Set to Quotation",
                         description=(
-                            "Resets a cancelled order back to draft "
-                            "quotation state."
+                            "Resets a cancelled order back to draft quotation state."
                         ),
                     ),
                 ),

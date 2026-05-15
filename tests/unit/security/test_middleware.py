@@ -96,6 +96,7 @@ def middleware(
     sanitizer: ErrorSanitizer,
 ) -> SecurityMiddleware:
     from odoo_mcp_gateway.core.security.audit import AuditLogger
+
     audit = AuditLogger(backend="logger")
     return SecurityMiddleware(restrictions, rbac, rate_limiter, audit, sanitizer)
 

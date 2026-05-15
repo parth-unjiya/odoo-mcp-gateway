@@ -815,9 +815,7 @@ class TestExceptionHandling:
     async def test_model_not_found_error(self, tools, mock_context):
         """Exception indicating model does not exist returns helpful message."""
         _, client = mock_context
-        client.execute_kw.side_effect = Exception(
-            "Object hr.employee does not exist"
-        )
+        client.execute_kw.side_effect = Exception("Object hr.employee does not exist")
         result = await tools["check_in"]()
         assert "error" in result
         assert "not available" in result["error"]

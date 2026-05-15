@@ -192,9 +192,7 @@ class TestSanitizeException:
         finally:
             _NoModuleError.__module__ = original_module
 
-    def test_known_odoo_exception_by_full_name(
-        self, sanitizer: ErrorSanitizer
-    ) -> None:
+    def test_known_odoo_exception_by_full_name(self, sanitizer: ErrorSanitizer) -> None:
         """sanitize_exception maps a known Odoo exception by fully-qualified name."""
         # Dynamically create a class whose module+qualname matches an _ERROR_MAP key
         access_error_cls = type("AccessError", (Exception,), {})
@@ -239,7 +237,9 @@ class TestSanitizeException:
 
     def test_exception_with_url_in_message(self, sanitizer: ErrorSanitizer) -> None:
         """URLs in exception messages are stripped."""
-        exc = RuntimeError("Failed to connect to https://internal.server.local:8069/api")
+        exc = RuntimeError(
+            "Failed to connect to https://internal.server.local:8069/api"
+        )
         result = sanitizer.sanitize_exception(exc)
         assert "https://internal" not in result
 
@@ -289,9 +289,7 @@ class TestSanitizeEdgeCases:
         result = sanitizer.sanitize(msg)
         assert result == "Operation failed"
 
-    def test_error_map_remainder_too_long(
-        self, sanitizer: ErrorSanitizer
-    ) -> None:
+    def test_error_map_remainder_too_long(self, sanitizer: ErrorSanitizer) -> None:
         """Error map entry with remainder > 200 chars returns friendly only."""
         long_remainder = "a" * 250
         msg = f"odoo.exceptions.ValidationError: {long_remainder}"
