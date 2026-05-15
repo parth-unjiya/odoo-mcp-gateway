@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.plugins.base import OdooPlugin
 from odoo_mcp_gateway.plugins.core.helpers import (
+    check_plugin_modules,
     check_security_gate,
+    format_model_error,
     get_auth_info,
     get_client,
     get_uid,
@@ -18,6 +21,11 @@ from odoo_mcp_gateway.plugins.core.helpers import (
 _TICKET_MODEL = "helpdesk.ticket"
 
 _VALID_PRIORITIES = frozenset({"0", "1", "2", "3"})
+
+# Stage name filter: word chars, spaces, hyphens; length 1-64.
+# Prevents passing arbitrary strings into the dotted-path domain filter
+# on `stage_id.name`.
+_STATE_FILTER_RE = re.compile(r"^[\w \-]{1,64}$")
 
 
 class HelpdeskPlugin(OdooPlugin):
@@ -41,6 +49,8 @@ class HelpdeskPlugin(OdooPlugin):
 
     def register(self, server: FastMCP, context: Any) -> None:
         """Register helpdesk tools on the MCP server."""
+        _plugin_name = self.name
+        _required_models = self.required_models
 
         @server.tool()
         async def get_my_tickets(
@@ -59,12 +69,19 @@ class HelpdeskPlugin(OdooPlugin):
             if client is None:
                 return {"error": "Not authenticated"}
 
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
+
             gate_error = await check_security_gate(context, "get_my_tickets")
             if gate_error:
                 return {"error": gate_error}
 
             if priority and priority not in _VALID_PRIORITIES:
                 return {"error": f"Invalid priority: {priority!r}"}
+
+            if state is not None and not _STATE_FILTER_RE.match(state):
+                return {"error": "Invalid state filter format"}
 
             uid = get_uid(context)
             if uid == 0:
@@ -112,17 +129,10 @@ class HelpdeskPlugin(OdooPlugin):
 
                 return {"tickets": records, "count": len(records)}
             except Exception as e:
-                error_msg = str(e)
-                lower = error_msg.lower()
-                if "does not exist" in lower or "not found" in lower:
-                    return {
-                        "error": (
-                            f"Model '{_TICKET_MODEL}' not available. "
-                            "Your Odoo installation may use a different "
-                            "helpdesk module (e.g. 'ticket.helpdesk')."
-                        ),
-                    }
-                return {"error": context.sanitize_error(e)}
+                model_err = format_model_error(
+                    _TICKET_MODEL, e, alternate_models=["ticket.helpdesk"]
+                )
+                return {"error": model_err or context.sanitize_error(e)}
 
         @server.tool()
         async def create_ticket(
@@ -142,6 +152,10 @@ class HelpdeskPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "create_ticket")
             if gate_error:
@@ -187,6 +201,16 @@ class HelpdeskPlugin(OdooPlugin):
                     values, _TICKET_MODEL, user_groups, is_admin
                 )
                 if isinstance(sanitized, dict):
+                    # If RBAC stripped user_id, refuse to create an unassigned
+                    # ticket silently — bail out with a clear permission error.
+                    if "user_id" in values and "user_id" not in sanitized:
+                        return {
+                            "error": (
+                                "Cannot create ticket: your role lacks "
+                                "permission to assign user_id. Contact an "
+                                "administrator."
+                            )
+                        }
                     values = sanitized
 
                 ticket_id = await client.execute_kw(
@@ -201,17 +225,10 @@ class HelpdeskPlugin(OdooPlugin):
                     "priority": priority,
                 }
             except Exception as e:
-                error_msg = str(e)
-                lower = error_msg.lower()
-                if "does not exist" in lower or "not found" in lower:
-                    return {
-                        "error": (
-                            f"Model '{_TICKET_MODEL}' not available. "
-                            "Your Odoo installation may use a different "
-                            "helpdesk module (e.g. 'ticket.helpdesk')."
-                        ),
-                    }
-                return {"error": context.sanitize_error(e)}
+                model_err = format_model_error(
+                    _TICKET_MODEL, e, alternate_models=["ticket.helpdesk"]
+                )
+                return {"error": model_err or context.sanitize_error(e)}
 
         @server.tool()
         async def update_ticket_stage(
@@ -227,6 +244,10 @@ class HelpdeskPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             if ticket_id <= 0:
                 return {"error": "ticket_id must be a positive integer"}
@@ -297,14 +318,7 @@ class HelpdeskPlugin(OdooPlugin):
                     "new_stage_id": stage_id,
                 }
             except Exception as e:
-                error_msg = str(e)
-                lower = error_msg.lower()
-                if "does not exist" in lower or "not found" in lower:
-                    return {
-                        "error": (
-                            f"Model '{_TICKET_MODEL}' not available. "
-                            "Your Odoo installation may use a different "
-                            "helpdesk module (e.g. 'ticket.helpdesk')."
-                        ),
-                    }
-                return {"error": context.sanitize_error(e)}
+                model_err = format_model_error(
+                    _TICKET_MODEL, e, alternate_models=["ticket.helpdesk"]
+                )
+                return {"error": model_err or context.sanitize_error(e)}

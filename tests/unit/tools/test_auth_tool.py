@@ -391,3 +391,133 @@ class TestAuthInputValidation:
 
         # Should NOT be an error -- length is exactly at the limit
         assert "error" not in resp or "too long" not in resp.get("error", "").lower()
+
+
+# ------------------------------------------------------------------
+# Settings → AuthManager wiring
+# ------------------------------------------------------------------
+
+
+class TestSettingsWiring:
+    """Verify AuthManager receives Settings values rather than defaults."""
+
+    async def test_session_timeout_passed_to_auth_manager(self) -> None:
+        """``session_timeout_seconds`` from Settings must flow into AuthManager."""
+        gateway = _make_gateway(session_timeout_seconds=42)
+        login_fn = _get_login_tool(gateway)
+
+        result = _auth_result(uid=1)
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_auth_cls:
+            instance = mock_auth_cls.return_value
+            instance.login = AsyncMock(return_value=result)
+
+            await login_fn(
+                method="password",
+                credential="pass",
+                username="admin",
+                database="testdb",
+            )
+
+        # Verify the constructor received the configured timeout.
+        kwargs = mock_auth_cls.call_args.kwargs
+        assert kwargs["session_timeout_seconds"] == 42
+
+    async def test_max_concurrent_sessions_passed_to_auth_manager(self) -> None:
+        """``max_concurrent_sessions`` from Settings must flow into AuthManager."""
+        gateway = _make_gateway(max_concurrent_sessions=7)
+        login_fn = _get_login_tool(gateway)
+
+        result = _auth_result(uid=1)
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_auth_cls:
+            instance = mock_auth_cls.return_value
+            instance.login = AsyncMock(return_value=result)
+
+            await login_fn(
+                method="password",
+                credential="pass",
+                username="admin",
+                database="testdb",
+            )
+
+        kwargs = mock_auth_cls.call_args.kwargs
+        assert kwargs["max_concurrent_sessions"] == 7
+
+
+# ------------------------------------------------------------------
+# IP / source-level rate limiting
+# ------------------------------------------------------------------
+
+
+class TestSourceRateLimit:
+    """Verify IP/source-level rate limiting wires into login."""
+
+    async def test_source_lockout_blocks_login(self) -> None:
+        """Pre-populating the IP rate limiter with failures should block login."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        # Saturate the source bucket. Default threshold is 30 failures.
+        for _ in range(30):
+            gateway.login_ip_rate_limiter.record_failure("stdio")
+
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_auth_cls:
+            instance = mock_auth_cls.return_value
+            instance.login = AsyncMock(return_value=_auth_result())
+
+            resp = await login_fn(
+                method="password",
+                credential="pass",
+                username="admin",
+                database="testdb",
+            )
+
+        # The login attempt should be blocked before AuthManager.login runs.
+        assert "error" in resp
+        assert "Too many failed login attempts from this source" in resp["error"]
+        instance.login.assert_not_called()
+
+    async def test_source_failure_recorded_on_auth_error(self) -> None:
+        """An OdooAuthError must record failures on BOTH limiters."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_auth_cls:
+            instance = mock_auth_cls.return_value
+            instance.login = AsyncMock(side_effect=OdooAuthError("bad creds"))
+
+            await login_fn(
+                method="password",
+                credential="wrong",
+                username="alice",
+                database="testdb",
+            )
+
+        # Username failure recorded.
+        assert gateway.login_rate_limiter._failures.get("alice") is not None
+        # Source (stdio) failure recorded.
+        assert gateway.login_ip_rate_limiter._failures.get("stdio") is not None
+
+    async def test_source_success_resets_counter(self) -> None:
+        """A successful login must clear the source failure counter."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        # Pre-load 5 failures (well under the threshold of 30).
+        for _ in range(5):
+            gateway.login_ip_rate_limiter.record_failure("stdio")
+        assert "stdio" in gateway.login_ip_rate_limiter._failures
+
+        result = _auth_result(uid=1)
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_auth_cls:
+            instance = mock_auth_cls.return_value
+            instance.login = AsyncMock(return_value=result)
+
+            resp = await login_fn(
+                method="password",
+                credential="pass",
+                username="admin",
+                database="testdb",
+            )
+
+        assert "error" not in resp
+        assert "stdio" not in gateway.login_ip_rate_limiter._failures

@@ -18,7 +18,7 @@ from .middleware import (
     register_tool_operations,
     security_gate,
 )
-from .rate_limit import RateLimiter, TokenBucket
+from .rate_limit import LoginIpRateLimiter, LoginRateLimiter, RateLimiter, TokenBucket
 from .rbac import RBACManager
 from .restrictions import RestrictionChecker
 from .sanitizer import ErrorSanitizer
@@ -28,6 +28,8 @@ __all__ = [
     "AuditLogger",
     "ErrorSanitizer",
     "GatewayConfig",
+    "LoginIpRateLimiter",
+    "LoginRateLimiter",
     "ModelAccessConfig",
     "RBACConfig",
     "RateLimiter",

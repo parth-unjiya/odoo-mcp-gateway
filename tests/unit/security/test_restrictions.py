@@ -77,17 +77,23 @@ class TestAlwaysBlocked:
 
 class TestAdminOnly:
     def test_blocked_for_non_admin(self, checker: RestrictionChecker) -> None:
-        msg = checker.check_model_access("res.users", "read", False)
+        msg = checker.check_model_access("res.groups", "read", False)
         assert msg is not None
         assert "administrator access" in msg
 
     def test_allowed_for_admin_read(self, checker: RestrictionChecker) -> None:
-        msg = checker.check_model_access("res.users", "read", True)
+        msg = checker.check_model_access("res.groups", "read", True)
         assert msg is None
 
     def test_allowed_for_admin_write(self, checker: RestrictionChecker) -> None:
-        msg = checker.check_model_access("res.users", "write", True)
+        msg = checker.check_model_access("res.groups", "write", True)
         assert msg is None
+
+    def test_res_users_always_blocked(self, checker: RestrictionChecker) -> None:
+        """res.users is hardcoded always-blocked — even admin cannot access via MCP."""
+        msg = checker.check_model_access("res.users", "read", True)
+        assert msg is not None
+        assert "always blocked" in msg
 
 
 # ── check_model_access: admin_write_only ───────────────────────────
@@ -252,11 +258,19 @@ class TestMethodAccess:
     ) -> None:
         msg = checker.check_method_access("sale.order", "_private", False)
         assert msg is not None
-        assert "Private methods" in msg
+        assert "Private method" in msg or "not whitelisted" in msg
 
-    def test_private_method_allowed_admin(self, checker: RestrictionChecker) -> None:
+    def test_private_method_blocked_even_for_admin_when_not_whitelisted(
+        self, checker: RestrictionChecker
+    ) -> None:
+        """Admin must NOT be a wildcard for underscore-prefixed methods.
+
+        Private methods are blocked for everyone (including admin) unless
+        explicitly listed in the model's allowed_methods.
+        """
         msg = checker.check_method_access("sale.order", "_private", True)
-        assert msg is None
+        assert msg is not None
+        assert "Private method" in msg or "not whitelisted" in msg
 
     def test_allowed_method_passes(self, checker: RestrictionChecker) -> None:
         msg = checker.check_method_access("sale.order", "action_confirm", False)
@@ -285,6 +299,77 @@ class TestMethodAccess:
     ) -> None:
         msg = checker.check_method_access("res.partner", "some_method", True)
         assert msg is None
+
+
+# ── Private-method admin guard ─────────────────────────────────────
+
+
+class TestPrivateMethodAdminGuard:
+    """Private methods require explicit whitelist — even for admin.
+
+    Admin should NOT be a wildcard for underscore-prefixed Odoo internals
+    (e.g. _compute_*, _inverse_*, _constrains_*, custom _unsafe_helper).
+    These can only be invoked when explicitly listed in the model's
+    allowed_methods.
+    """
+
+    @pytest.fixture
+    def checker(self) -> RestrictionChecker:
+        from odoo_mcp_gateway.core.security.config_loader import (
+            ModelAccessConfig,
+            RestrictionConfig,
+        )
+
+        return RestrictionChecker(
+            config=RestrictionConfig(),
+            model_access=ModelAccessConfig(
+                default_policy="allow",
+                allowed_methods={
+                    "sale.order": ["action_confirm", "_internal_compute_safe"],
+                },
+            ),
+        )
+
+    def test_private_method_blocked_for_admin_when_not_whitelisted(
+        self, checker: RestrictionChecker
+    ) -> None:
+        """Admin cannot call _compute_amount unless whitelisted."""
+        msg = checker.check_method_access("sale.order", "_compute_amount", True)
+        assert msg is not None
+        assert "Private method" in msg or "not whitelisted" in msg
+
+    def test_private_method_blocked_for_non_admin_when_not_whitelisted(
+        self, checker: RestrictionChecker
+    ) -> None:
+        msg = checker.check_method_access("sale.order", "_some_internal", False)
+        assert msg is not None
+
+    def test_private_method_allowed_when_explicitly_whitelisted_for_admin(
+        self, checker: RestrictionChecker
+    ) -> None:
+        """Admin can call a private method that IS in allowed_methods."""
+        msg = checker.check_method_access(
+            "sale.order", "_internal_compute_safe", True
+        )
+        assert msg is None
+
+    def test_private_method_allowed_when_explicitly_whitelisted_for_user(
+        self, checker: RestrictionChecker
+    ) -> None:
+        """Non-admin can also call whitelisted private methods."""
+        msg = checker.check_method_access(
+            "sale.order", "_internal_compute_safe", False
+        )
+        assert msg is None
+
+    def test_private_method_blocked_for_unlisted_model(
+        self, checker: RestrictionChecker
+    ) -> None:
+        """Private method on a model with no allowed_methods entry — blocked."""
+        msg = checker.check_method_access(
+            "res.partner", "_compute_display_name", True
+        )
+        assert msg is not None
 
 
 # ── check_field_write ──────────────────────────────────────────────
@@ -337,7 +422,7 @@ class TestGetAccessibleModels:
     def test_admin_sees_admin_only(self, checker: RestrictionChecker) -> None:
         models = checker.get_accessible_models(True)
         assert "ir.model" in models
-        assert "res.users" in models
+        assert "res.groups" in models
 
     def test_always_blocked_never_in_list(self, checker: RestrictionChecker) -> None:
         models = checker.get_accessible_models(True)
@@ -635,3 +720,154 @@ class TestHardcodedAlwaysBlockedModels:
         assert result is not None, (
             f"Hardcoded model '{model}' should be blocked even if in full_crud"
         )
+
+
+# ── _ALWAYS_READ_ONLY_MODELS (hardcoded, not configurable) ────────
+
+
+class TestAlwaysReadOnlyModels:
+    """Tests for hardcoded read-only models (mail.message, etc.)."""
+
+    def test_read_allowed(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.message", "read", False)
+        assert msg is None
+
+    def test_create_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.message", "create", False)
+        assert msg is not None
+        assert "read-only" in msg
+
+    def test_write_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.message", "write", True)
+        assert msg is not None
+        assert "read-only" in msg
+
+    def test_delete_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.message", "delete", True)
+        assert msg is not None
+
+    def test_admin_cannot_bypass(self, checker: RestrictionChecker) -> None:
+        """Even admin cannot write to hardcoded read-only models."""
+        msg = checker.check_model_access("mail.message", "create", True)
+        assert msg is not None
+
+    def test_mail_followers_read_allowed(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.followers", "read", False)
+        assert msg is None
+
+    def test_mail_followers_write_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.followers", "create", False)
+        assert msg is not None
+
+    def test_mail_activity_read_allowed(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.activity", "read", False)
+        assert msg is None
+
+    def test_mail_activity_write_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.activity", "write", True)
+        assert msg is not None
+
+
+# ── Newly hardcoded blocked models ────────────────────────────────
+
+
+class TestNewBlockedModels:
+    """Tests for newly hardcoded blocked models."""
+
+    def test_ir_attachment_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("ir.attachment", "read", True)
+        assert msg is not None
+        assert "always blocked" in msg
+
+    def test_payment_token_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("payment.token", "read", True)
+        assert msg is not None
+
+    def test_payment_provider_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("payment.provider", "read", True)
+        assert msg is not None
+
+    def test_base_automation_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("base.automation", "read", True)
+        assert msg is not None
+
+    def test_mail_template_blocked(self, checker: RestrictionChecker) -> None:
+        msg = checker.check_model_access("mail.template", "read", True)
+        assert msg is not None
+
+
+# ── Expanded blocklists (v0.2.1+) ──────────────────────────────────
+
+
+class TestExpandedBlocklists:
+    """Tests for the additional models, methods, and write fields added in v0.2.1."""
+
+    @pytest.fixture
+    def checker(self) -> RestrictionChecker:
+        from odoo_mcp_gateway.core.security.config_loader import (
+            ModelAccessConfig,
+            RestrictionConfig,
+        )
+
+        return RestrictionChecker(
+            config=RestrictionConfig(),
+            model_access=ModelAccessConfig(default_policy="allow"),
+        )
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "auth.totp.wizard",
+            "auth.totp.device",
+            "res.users.log",
+            "ir.logging",
+            "iap.account",
+            "ir.exports",
+            "ir.exports.line",
+            "digest.digest",
+        ],
+    )
+    def test_new_always_blocked_models(
+        self, checker: RestrictionChecker, model: str
+    ) -> None:
+        msg = checker.check_model_access(model, "read", True)
+        assert msg is not None
+        assert "always blocked" in msg
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "mail.notification",
+            "mail.compose.message",
+            "mail.alias",
+            "discuss.channel.member",
+        ],
+    )
+    def test_new_read_only_models_block_writes(
+        self, checker: RestrictionChecker, model: str
+    ) -> None:
+        # Write blocked
+        msg = checker.check_model_access(model, "create", True)
+        assert msg is not None
+        # Read allowed
+        msg = checker.check_model_access(model, "read", False)
+        assert msg is None
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "name_create",
+            "load",
+            "import_data",
+            "export_data",
+            "flush_recordset",
+            "invalidate_recordset",
+            "_search_panel_select_range",
+            "_search",
+        ],
+    )
+    def test_new_always_blocked_methods(
+        self, checker: RestrictionChecker, method: str
+    ) -> None:
+        msg = checker.check_method_access("sale.order", method, True)
+        assert msg is not None

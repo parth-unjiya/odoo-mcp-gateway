@@ -50,9 +50,20 @@ always_blocked:
   - res.config.settings
   - base_setup.config
 
+# NOTE: The following models are HARDCODED as always-blocked in the gateway code
+# and CANNOT be unblocked even by adding them to lists below:
+#   res.users, res.users.apikeys, ir.config_parameter, ir.attachment,
+#   payment.token, payment.provider, base.automation, mail.template,
+#   mail.mail, ir.cron, ir.module.module, ir.model.access, ir.rule,
+#   ir.mail_server, ir.ui.view, ir.actions.server, fetchmail.server,
+#   bus.bus, change.password.wizard, change.password.user,
+#   res.config.settings, base.module.{update,upgrade,uninstall}
+#
+# The following are HARDCODED read-only (reads OK, writes blocked for everyone):
+#   mail.message, mail.followers, mail.activity, discuss.channel
+
 # Models accessible only to users in base.group_system (Odoo admin).
 admin_only:
-  - res.users
   - res.groups
   - ir.model
   - ir.model.fields

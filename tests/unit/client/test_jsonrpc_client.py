@@ -13,6 +13,7 @@ from odoo_mcp_gateway.client.exceptions import (
     OdooAuthError,
     OdooConnectionError,
     OdooMissingError,
+    OdooSessionExpiredError,
     OdooUserError,
     OdooValidationError,
 )
@@ -141,7 +142,7 @@ class TestAuthenticate:
 
         assert client._db == "db"
         assert client._login == "u"
-        assert client._password == "p"
+        assert client._password.reveal() == "p"
 
     async def test_session_id_extracted(self) -> None:
         resp = _make_response(
@@ -260,14 +261,15 @@ class TestErrorClassification:
 
 
 class TestSessionRetry:
-    async def test_retries_once_on_auth_error(self) -> None:
+    async def test_retries_once_on_session_expired(self) -> None:
+        """Canonical session-expiry exception triggers one auto-retry."""
         auth_resp = _make_response(
             _success_body(_auth_body()),
             session_id="s1",
         )
         expired_resp = _make_response(
             _error_body(
-                "odoo.exceptions.AccessDenied",
+                "odoo.http.SessionExpiredException",
                 "Session expired",
             )
         )
@@ -286,16 +288,105 @@ class TestSessionRetry:
         assert result == [1, 2, 3]
         assert mock.post.call_count == 4
 
-    async def test_no_retry_without_stored_credentials(self) -> None:
-        """Auth error propagates when no credentials stored."""
+    async def test_retries_on_message_marker_session_expired(self) -> None:
+        """Unmapped exc name but session-expiry message still triggers retry."""
+        auth_resp = _make_response(
+            _success_body(_auth_body()),
+            session_id="s1",
+        )
+        # No canonical exc name — Odoo sometimes only signals via message.
         expired_resp = _make_response(
-            _error_body("odoo.exceptions.AccessDenied", "expired")
+            _error_body("", "Session expired, please log in again")
+        )
+        reauth_resp = _make_response(
+            _success_body(_auth_body()),
+            session_id="s2",
+        )
+        ok_resp = _make_response(_success_body([7]))
+
+        mock = _mock_http([auth_resp, expired_resp, reauth_resp, ok_resp])
+        client = JsonRpcClient(_URL, httpx_client=mock)
+
+        await client.authenticate("db", "u", "p")
+        result = await client.execute_kw("res.partner", "search", [[]])
+
+        assert result == [7]
+        assert mock.post.call_count == 4
+
+    async def test_access_denied_does_not_retry(self) -> None:
+        """AccessDenied should propagate as OdooAuthError WITHOUT retry."""
+        auth_resp = _make_response(
+            _success_body(_auth_body()),
+            session_id="s1",
+        )
+        denied_resp = _make_response(
+            _error_body("odoo.exceptions.AccessDenied", "Access denied")
+        )
+
+        mock = _mock_http([auth_resp, denied_resp])
+        client = JsonRpcClient(_URL, httpx_client=mock)
+
+        await client.authenticate("db", "u", "p")
+
+        with pytest.raises(OdooAuthError, match="Access denied"):
+            await client.execute_kw("res.partner", "search", [[]])
+
+        # Authenticate (1) + failing call (1) = 2 POSTs, no retry.
+        assert mock.post.call_count == 2
+
+    async def test_no_retry_without_stored_credentials(self) -> None:
+        """Session-expired propagates when no credentials are stored."""
+        expired_resp = _make_response(
+            _error_body("odoo.http.SessionExpiredException", "Session expired")
         )
         mock = _mock_http([expired_resp])
         client = JsonRpcClient(_URL, httpx_client=mock)
 
-        with pytest.raises(OdooAuthError):
+        with pytest.raises(OdooSessionExpiredError):
             await client.execute_kw("res.partner", "search", [[]])
+
+    async def test_retry_only_on_session_expired_not_access_denied(self) -> None:
+        """OdooAuthError without session-expiry signal should NOT trigger retry."""
+        from odoo_mcp_gateway.client.base import Credential
+
+        client = JsonRpcClient(base_url="http://test:8069")
+        client._db = "testdb"
+        client._login = "user"
+        client._password = Credential("pwd")
+
+        # Mock _rpc to always raise OdooAuthError (not session expired)
+        client._rpc = AsyncMock(side_effect=OdooAuthError("Access denied"))
+
+        with pytest.raises(OdooAuthError, match="Access denied"):
+            await client.execute_kw("res.partner", "search_read", [[]], {})
+        # Should be called exactly once (no retry)
+        assert client._rpc.call_count == 1
+
+    async def test_retry_on_session_expired(self) -> None:
+        """OdooSessionExpiredError SHOULD trigger one retry after re-authenticate."""
+        from odoo_mcp_gateway.client.base import Credential
+
+        client = JsonRpcClient(base_url="http://test:8069")
+        client._db = "testdb"
+        client._login = "user"
+        client._password = Credential("pwd")
+
+        # First call: session expired. Second call (after re-auth): success.
+        call_count = {"n": 0}
+
+        async def fake_rpc(*args: Any, **kwargs: Any) -> Any:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise OdooSessionExpiredError("Session expired")
+            return [{"id": 1, "name": "Test"}]
+
+        client._rpc = fake_rpc
+        # Mock authenticate so the retry-reauth step doesn't hit network
+        client.authenticate = AsyncMock(return_value=None)
+
+        result = await client.execute_kw("res.partner", "search_read", [[]], {})
+        assert result == [{"id": 1, "name": "Test"}]
+        assert call_count["n"] == 2  # First failed, retry succeeded
 
 
 # ------------------------------------------------------------------
@@ -360,6 +451,56 @@ class TestClose:
         client._owns_client = True
         await client.close()
         mock.aclose.assert_called_once()
+
+    async def test_close_clears_credentials(self) -> None:
+        """close() must zero out password, login, db, uid, and session_id."""
+        resp = _make_response(
+            _success_body(_auth_body()),
+            session_id="sess_secret",
+        )
+        mock = _mock_http([resp])
+        client = JsonRpcClient(_URL, httpx_client=mock)
+        await client.authenticate("db", "u", "secret_pwd")
+
+        await client.close()
+
+        assert client._password.reveal() is None
+        assert client._session_id.reveal() is None
+        assert client._login is None
+        assert client._db is None
+        assert client._uid is None
+
+
+# ------------------------------------------------------------------
+# Credential leak protection
+# ------------------------------------------------------------------
+
+
+class TestCredentialLeakProtection:
+    async def test_password_not_in_repr(self) -> None:
+        """Credential should never appear in repr() of the client."""
+        from odoo_mcp_gateway.client.base import Credential
+        from odoo_mcp_gateway.client.jsonrpc import JsonRpcClient
+
+        client = JsonRpcClient(base_url="http://test:8069")
+        # Manually set password (don't actually authenticate)
+        client._password = Credential("super_secret_pwd_12345")
+
+        # Neither repr nor str should leak it
+        assert "super_secret_pwd_12345" not in repr(client._password)
+        assert "super_secret_pwd_12345" not in str(client._password)
+        assert "***" in repr(client._password) or "Credential" in repr(client._password)
+
+    async def test_session_id_not_in_repr(self) -> None:
+        """Session id is also wrapped and should not leak via repr/str."""
+        from odoo_mcp_gateway.client.base import Credential
+        from odoo_mcp_gateway.client.jsonrpc import JsonRpcClient
+
+        client = JsonRpcClient(base_url="http://test:8069")
+        client._session_id = Credential("session_token_xyz_secret")
+
+        assert "session_token_xyz_secret" not in repr(client._session_id)
+        assert "session_token_xyz_secret" not in str(client._session_id)
 
 
 # ------------------------------------------------------------------

@@ -226,6 +226,87 @@ class TestSanitizeWriteValues:
         assert values["wage"] == 5000
 
 
+# ── sanitize_write_values transparency (return_dropped) ────────────
+
+
+class TestSanitizeWriteValuesTransparency:
+    def test_return_dropped_lists_redacted_fields(self, rbac: RBACManager) -> None:
+        values = {"name": "Alice", "wage": 5000, "salary": 99999}
+        sanitized, dropped = rbac.sanitize_write_values(
+            values,
+            "hr.employee",
+            ["base.group_user"],
+            False,
+            return_dropped=True,
+        )
+        assert sanitized == {"name": "Alice"}
+        assert sorted(dropped) == ["salary", "wage"]
+
+    def test_return_dropped_empty_when_no_drops(self, rbac: RBACManager) -> None:
+        values = {"name": "Test", "code": "ABC"}
+        sanitized, dropped = rbac.sanitize_write_values(
+            values,
+            "product.category",
+            ["base.group_user"],
+            False,
+            return_dropped=True,
+        )
+        assert sanitized == {"name": "Test", "code": "ABC"}
+        assert dropped == []
+
+    def test_return_dropped_empty_for_admin(self, rbac: RBACManager) -> None:
+        values = {"wage": 5000, "salary": 99999, "name": "Alice"}
+        sanitized, dropped = rbac.sanitize_write_values(
+            values,
+            "hr.employee",
+            [],
+            True,
+            return_dropped=True,
+        )
+        assert sanitized == values
+        assert dropped == []
+
+    def test_default_return_signature_unchanged(self, rbac: RBACManager) -> None:
+        values = {"name": "Alice", "wage": 5000}
+        result = rbac.sanitize_write_values(
+            values, "hr.employee", ["base.group_user"], False
+        )
+        # Backward compatibility: default call returns plain dict, not a tuple.
+        assert isinstance(result, dict)
+        assert result == {"name": "Alice"}
+
+    def test_default_return_signature_admin(self, rbac: RBACManager) -> None:
+        values = {"wage": 5000, "name": "Alice"}
+        result = rbac.sanitize_write_values(values, "hr.employee", [], True)
+        assert isinstance(result, dict)
+        assert result == values
+
+    def test_return_dropped_preserves_input_order(self, rbac: RBACManager) -> None:
+        # Dropped list should follow input key order to make audit logs
+        # deterministic.
+        values = {"salary": 99999, "name": "Alice", "wage": 5000}
+        _, dropped = rbac.sanitize_write_values(
+            values,
+            "hr.employee",
+            ["base.group_user"],
+            False,
+            return_dropped=True,
+        )
+        assert dropped == ["salary", "wage"]
+
+    def test_return_dropped_field_group_override(self, rbac: RBACManager) -> None:
+        values = {"amount_total": 1500.0, "name": "INV/001"}
+        sanitized, dropped = rbac.sanitize_write_values(
+            values,
+            "account.move",
+            ["account.group_account_invoice"],
+            False,
+            return_dropped=True,
+        )
+        assert sanitized == {"name": "INV/001"}
+        assert dropped == ["amount_total"]
+
+
 # ── get_visible_fields ─────────────────────────────────────────────
 
 

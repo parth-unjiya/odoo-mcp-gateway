@@ -19,6 +19,14 @@ class OdooAuthError(OdooError):
     """Invalid credentials or expired session."""
 
 
+class OdooSessionExpiredError(OdooAuthError):
+    """Raised when the Odoo session has expired and a fresh login is needed.
+
+    Distinguished from :class:`OdooAuthError` so that retry logic can target only
+    session expiry (legitimate retry) and not access denials (no retry).
+    """
+
+
 class OdooAccessError(OdooError):
     """Access denied by ir.model.access or ir.rule."""
 

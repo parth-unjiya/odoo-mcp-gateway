@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.plugins.base import OdooPlugin
 from odoo_mcp_gateway.plugins.core.helpers import (
+    check_plugin_modules,
     check_security_gate,
     format_model_error,
     get_auth_info,
@@ -42,6 +43,8 @@ class SalesPlugin(OdooPlugin):
 
     def register(self, server: FastMCP, context: Any) -> None:
         """Register sales tools on the MCP server."""
+        _plugin_name = self.name
+        _required_models = self.required_models
 
         @server.tool()
         async def get_my_quotations(
@@ -57,6 +60,10 @@ class SalesPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "get_my_quotations")
             if gate_error:
@@ -121,6 +128,10 @@ class SalesPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             if order_id <= 0:
                 return {"error": "order_id must be a positive integer"}
@@ -228,6 +239,10 @@ class SalesPlugin(OdooPlugin):
             if client is None:
                 return {"error": "Not authenticated"}
 
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
+
             if order_id <= 0:
                 return {"error": "order_id must be a positive integer"}
 
@@ -310,6 +325,10 @@ class SalesPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "get_sales_summary")
             if gate_error:

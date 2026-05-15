@@ -42,9 +42,11 @@ Thumbs.db
 CLAUDE.md
 DEVELOPMENT_PLAN.md
 PAIN_POINTS_AND_PLAN.md
+MCP_CHANGES_NEEDED.md
 odoo_mcp_servers_analysis.md
 v*_test_report.md
 V2_ROADMAP.md
 OPENCLAW_COMPARISON.md
 .claude-flow/
 .claude/
+.mcp.json

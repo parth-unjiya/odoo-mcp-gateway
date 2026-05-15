@@ -63,11 +63,21 @@ def get_auth_info(context: Any) -> tuple[bool, list[str]]:
     return getattr(result, "is_admin", False), getattr(result, "groups", [])
 
 
-def format_model_error(model: str, exc: Exception) -> str | None:
+def format_model_error(
+    model: str,
+    exc: Exception,
+    alternate_models: list[str] | None = None,
+) -> str | None:
     """Detect model-not-found errors and return a user-friendly message.
 
     Returns a descriptive error string if the exception indicates the model
     is not available (module not installed), or None if unrecognized.
+
+    Args:
+        model: The model name that was queried.
+        exc: The exception raised by the Odoo client.
+        alternate_models: Optional list of alternate model names to suggest
+            (e.g. for installations that use a different module name).
     """
     msg = str(exc).lower()
     if (
@@ -76,9 +86,42 @@ def format_model_error(model: str, exc: Exception) -> str | None:
         or "404" in msg
         or msg.strip() == model  # v17 returns bare model name
     ):
-        return (
+        message = (
             f"Model '{model}' is not available. "
             "The required Odoo module may not be installed."
+        )
+        if alternate_models:
+            message += (
+                " — try checking alternate model names: "
+                f"{', '.join(alternate_models)}"
+            )
+        return message
+    return None
+
+
+def check_plugin_modules(
+    context: Any, plugin_name: str, required_models: list[str]
+) -> str | None:
+    """Check if plugin's required Odoo modules are installed.
+
+    Returns an error message string when modules are missing, or None if
+    everything is available and the tool may proceed.
+    """
+    registry = getattr(context, "plugin_registry", None)
+    if registry is None:
+        return None
+    try:
+        info = registry.get_plugin(plugin_name)
+    except Exception:
+        return None
+    if info is None:
+        return None
+    missing = getattr(info, "missing_modules", None)
+    if isinstance(missing, list) and missing:
+        return (
+            f"This tool requires Odoo modules that are not installed: "
+            f"{', '.join(missing)}. "
+            f"Please install them in your Odoo instance."
         )
     return None
 

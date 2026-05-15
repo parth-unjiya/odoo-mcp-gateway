@@ -197,6 +197,14 @@ class TestSessionStrategy:
             "username": "admin",
         }
         mgr = _make_manager(session_info=session_info)
+        # The login flow now verifies is_admin server-side via has_group.
+        # Make has_group return True so the verified value is True.
+        mgr._jsonrpc.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                True,  # _verify_admin_via_has_group → base.group_system
+            ]
+        )
 
         auth = await mgr.login("session", "", "session-token-xyz", "testdb")
 
@@ -230,7 +238,7 @@ class TestSessionStrategy:
 
         await mgr.login("session", "", "my-session-id", "testdb")
 
-        assert mgr._jsonrpc._session_id == "my-session-id"
+        assert mgr._jsonrpc._session_id.reveal() == "my-session-id"
 
     async def test_groups_fetched_after_session(self) -> None:
         session_info: dict[str, Any] = {
@@ -541,12 +549,15 @@ class TestAdminDetectionViaXmlId:
         xml_client = AsyncMock(spec=XmlRpcClient)
         json_client.authenticate = AsyncMock(return_value=result)
 
-        # First call: search_read for groups (returns empty)
-        # Second call: has_group for base.group_system (returns True)
+        # Call sequence:
+        # 1. groups search_read
+        # 2. _detect_admin_via_xmlid → has_group base.group_system
+        # 3. _verify_admin_via_has_group → has_group base.group_system (final override)
         json_client.execute_kw = AsyncMock(
             side_effect=[
                 [],  # groups search_read
-                True,  # has_group base.group_system
+                True,  # has_group base.group_system (xmlid detect)
+                True,  # has_group base.group_system (verify override)
             ]
         )
 
@@ -556,28 +567,37 @@ class TestAdminDetectionViaXmlId:
         assert auth.is_admin is True
 
     async def test_erp_manager_detected_via_has_group(self) -> None:
-        """has_group('base.group_erp_manager') returning True sets is_admin."""
+        """ERP manager detection runs in _detect_admin_via_xmlid, but the
+        final ``is_admin`` is overridden by ``_verify_admin_via_has_group``
+        which only checks ``base.group_system``. So a pure ERP manager
+        (without group_system) ends up with is_admin=False after override.
+        """
         result = _auth_result(uid=1, is_admin=False)
         json_client = AsyncMock(spec=JsonRpcClient)
         xml_client = AsyncMock(spec=XmlRpcClient)
         json_client.authenticate = AsyncMock(return_value=result)
 
-        # groups search_read, has_group system=False, has_group erp_manager=True
+        # groups search_read, has_group system=False, has_group erp_manager=True,
+        # then verify has_group system=False (final override).
         json_client.execute_kw = AsyncMock(
             side_effect=[
                 [],  # groups search_read
-                False,  # has_group base.group_system
-                True,  # has_group base.group_erp_manager
+                False,  # has_group base.group_system (xmlid detect)
+                True,  # has_group base.group_erp_manager (xmlid detect)
+                False,  # has_group base.group_system (verify override)
             ]
         )
 
         mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
         auth = await mgr.login("password", "admin", "pass", "testdb")
 
-        assert auth.is_admin is True
+        # _verify_admin_via_has_group only checks base.group_system, which
+        # is False — so the ERP manager flag does not survive the override.
+        # This is the intended fail-closed behavior.
+        assert auth.is_admin is False
 
     async def test_non_admin_stays_non_admin(self) -> None:
-        """If has_group returns False for both, is_admin stays False."""
+        """If has_group returns False for system, is_admin stays False."""
         result = _auth_result(uid=1, is_admin=False)
         json_client = AsyncMock(spec=JsonRpcClient)
         xml_client = AsyncMock(spec=XmlRpcClient)
@@ -586,8 +606,9 @@ class TestAdminDetectionViaXmlId:
         json_client.execute_kw = AsyncMock(
             side_effect=[
                 [],  # groups search_read
-                False,  # has_group base.group_system
-                False,  # has_group base.group_erp_manager
+                False,  # has_group base.group_system (xmlid detect)
+                False,  # has_group base.group_erp_manager (xmlid detect)
+                False,  # has_group base.group_system (verify override)
             ]
         )
 
@@ -596,20 +617,28 @@ class TestAdminDetectionViaXmlId:
 
         assert auth.is_admin is False
 
-    async def test_already_admin_skips_has_group(self) -> None:
-        """If is_admin is already True (from session), has_group is skipped."""
-        result = _auth_result(uid=1, is_admin=True)
+    async def test_tampered_is_admin_overridden(self) -> None:
+        """A tampered auth response with is_admin=True must NOT survive
+        the server-side verification step. Even if the auth payload claims
+        admin, has_group is the source of truth."""
+        result = _auth_result(uid=1, is_admin=True)  # Tampered/forged
         json_client = AsyncMock(spec=JsonRpcClient)
         xml_client = AsyncMock(spec=XmlRpcClient)
         json_client.authenticate = AsyncMock(return_value=result)
-        json_client.execute_kw = AsyncMock(return_value=[])
+        # _detect_admin_via_xmlid is short-circuited because is_admin is
+        # already True. _verify_admin_via_has_group still runs.
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                False,  # has_group base.group_system (verify override)
+            ]
+        )
 
         mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
         auth = await mgr.login("password", "admin", "pass", "testdb")
 
-        assert auth.is_admin is True
-        # Only the group search_read call should happen, no has_group calls
-        assert json_client.execute_kw.call_count == 1
+        # The forged is_admin=True is overridden by the verified False.
+        assert auth.is_admin is False
 
     async def test_has_group_failure_does_not_break(self) -> None:
         """If has_group raises, admin detection gracefully degrades."""
@@ -621,13 +650,14 @@ class TestAdminDetectionViaXmlId:
         json_client.execute_kw = AsyncMock(
             side_effect=[
                 [],  # groups search_read
-                RuntimeError("network"),  # has_group base.group_system
-                RuntimeError("network"),  # has_group base.group_erp_manager
+                RuntimeError("network"),  # has_group base.group_system (xmlid)
+                RuntimeError("network"),  # has_group base.group_erp_manager (xmlid)
+                RuntimeError("network"),  # has_group base.group_system (verify)
             ]
         )
 
         mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
         auth = await mgr.login("password", "user", "pass", "testdb")
 
-        # Should not raise, admin stays False
+        # Should not raise, admin stays False (fail-closed).
         assert auth.is_admin is False

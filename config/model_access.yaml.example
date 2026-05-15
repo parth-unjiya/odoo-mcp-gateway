@@ -44,8 +44,9 @@ stock_models:
     - hr.leave.type
     - helpdesk.ticket
     - helpdesk.team
-    - mail.message
-    - mail.activity
+    # NOTE: mail.message, mail.followers, and mail.activity are hardcoded
+    # as read-only in the gateway to prevent message injection and activity
+    # spoofing.  They are readable but writes are always blocked.
     - mail.activity.type
     - calendar.event
     - calendar.attendee
@@ -72,8 +73,10 @@ stock_models:
     - hr.work.location
 
   # Admin-only access (requires base.group_system)
+  # NOTE: res.users, ir.attachment, payment.token, payment.provider, etc.
+  # are HARDCODED blocked in the gateway code — listing them here has no effect.
+  # See src/odoo_mcp_gateway/core/security/restrictions.py:_ALWAYS_BLOCKED_MODELS
   admin_only:
-    - res.users
     - res.groups
     - ir.model
     - ir.model.fields

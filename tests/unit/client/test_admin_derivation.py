@@ -33,9 +33,14 @@ def _make_manager(
     *,
     auth_result: AuthResult,
     execute_kw_result: Any = None,
+    has_group_result: bool = False,
     strategy: str = "api_key",
 ) -> AuthManager:
-    """Build an AuthManager with mocked clients and controlled group data."""
+    """Build an AuthManager with mocked clients and controlled group data.
+
+    ``execute_kw`` is dispatched by method name so a single helper can serve
+    both ``search_read`` (groups) and ``has_group`` (admin verification).
+    """
     json_client = AsyncMock(spec=JsonRpcClient)
     xml_client = AsyncMock(spec=XmlRpcClient)
 
@@ -43,8 +48,15 @@ def _make_manager(
     xml_client.authenticate = AsyncMock(return_value=auth_result)
 
     groups = execute_kw_result if execute_kw_result is not None else []
-    json_client.execute_kw = AsyncMock(return_value=groups)
-    xml_client.execute_kw = AsyncMock(return_value=groups)
+
+    async def _dispatch(model: str, method: str, *args: Any, **kwargs: Any) -> Any:
+        if method == "has_group":
+            return has_group_result
+        # Default: groups search_read
+        return groups
+
+    json_client.execute_kw = AsyncMock(side_effect=_dispatch)
+    xml_client.execute_kw = AsyncMock(side_effect=_dispatch)
 
     # Session strategy needs _rpc
     json_client._rpc = AsyncMock(return_value={"uid": 0})
@@ -64,31 +76,44 @@ class TestAdminDerivationFromGroups:
     """Verify _fetch_groups sets is_admin based on group membership."""
 
     async def test_group_system_sets_admin(self) -> None:
-        """When groups include 'base.group_system', is_admin becomes True."""
+        """When groups include 'base.group_system' AND has_group confirms it,
+        is_admin becomes True."""
         result = _auth_result(is_admin=False)
         groups = [
             {"full_name": "base.group_user"},
             {"full_name": "base.group_system"},
         ]
-        mgr = _make_manager(auth_result=result, execute_kw_result=groups)
+        mgr = _make_manager(
+            auth_result=result,
+            execute_kw_result=groups,
+            has_group_result=True,
+        )
 
         auth = await mgr.login("api_key", "test", "key", "testdb")
 
         assert auth.is_admin is True
         assert "base.group_system" in auth.groups
 
-    async def test_erp_manager_sets_admin(self) -> None:
-        """When groups include 'base.group_erp_manager', is_admin becomes True."""
+    async def test_erp_manager_groups_alone_does_not_grant_admin(self) -> None:
+        """ERP manager group membership without group_system membership
+        results in is_admin=False because the verification step only
+        checks ``base.group_system`` (fail-closed)."""
         result = _auth_result(is_admin=False)
         groups = [
             {"full_name": "base.group_user"},
             {"full_name": "base.group_erp_manager"},
         ]
-        mgr = _make_manager(auth_result=result, execute_kw_result=groups)
+        # has_group_result=False — user is NOT in base.group_system.
+        mgr = _make_manager(
+            auth_result=result,
+            execute_kw_result=groups,
+            has_group_result=False,
+        )
 
         auth = await mgr.login("api_key", "test", "key", "testdb")
 
-        assert auth.is_admin is True
+        # Verification step overrides ERP manager → is_admin stays False.
+        assert auth.is_admin is False
         assert "base.group_erp_manager" in auth.groups
 
     async def test_no_admin_groups_stays_false(self) -> None:
@@ -107,9 +132,10 @@ class TestAdminDerivationFromGroups:
         assert "base.group_user" in auth.groups
         assert "base.group_portal" in auth.groups
 
-    async def test_already_admin_stays_true_without_groups(self) -> None:
-        """When is_admin is already True (e.g. from JSON-RPC), it stays True
-        even if group membership doesn't contain admin indicators."""
+    async def test_tampered_is_admin_overridden_by_verify(self) -> None:
+        """When is_admin is True in the auth response (potentially tampered)
+        but ``has_group`` returns False, the verified value wins (fail-closed).
+        """
         result = _auth_result(is_admin=True)
         groups = [
             {"full_name": "base.group_user"},
@@ -117,23 +143,28 @@ class TestAdminDerivationFromGroups:
         mgr = _make_manager(
             auth_result=result,
             execute_kw_result=groups,
+            has_group_result=False,
             strategy="password",
         )
 
         auth = await mgr.login("password", "admin", "pass", "testdb")
 
-        assert auth.is_admin is True
+        # The forged is_admin=True is overridden by the verified False.
+        assert auth.is_admin is False
         # Groups should still be populated
         assert "base.group_user" in auth.groups
 
-    async def test_already_admin_stays_true_with_admin_groups(self) -> None:
-        """When is_admin is already True and groups also contain admin,
-        is_admin remains True."""
+    async def test_already_admin_confirmed_by_has_group(self) -> None:
+        """When is_admin is True AND has_group confirms it, stays True."""
         result = _auth_result(is_admin=True)
         groups = [
             {"full_name": "base.group_system"},
         ]
-        mgr = _make_manager(auth_result=result, execute_kw_result=groups)
+        mgr = _make_manager(
+            auth_result=result,
+            execute_kw_result=groups,
+            has_group_result=True,
+        )
 
         auth = await mgr.login("api_key", "admin", "key", "testdb")
 

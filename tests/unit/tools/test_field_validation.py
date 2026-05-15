@@ -1,14 +1,19 @@
 """Tests for field name validation functions in crud.py.
 
-Covers _validate_fields (regular field names) and _validate_agg_fields
-(aggregate field names with optional :operator suffix).
+Covers _validate_fields (regular field names), _validate_agg_fields
+(aggregate field names with optional :operator suffix), and
+_validate_groupby_fields (groupby fields with optional temporal operators).
 """
 
 from __future__ import annotations
 
 import pytest
 
-from odoo_mcp_gateway.tools.crud import _validate_agg_fields, _validate_fields
+from odoo_mcp_gateway.tools.crud import (
+    _validate_agg_fields,
+    _validate_fields,
+    _validate_groupby_fields,
+)
 
 
 class TestValidateFields:
@@ -153,3 +158,75 @@ class TestValidateAggFields:
     def test_rejects_leading_digit(self) -> None:
         with pytest.raises(ValueError, match="Invalid field name"):
             _validate_agg_fields(["1field:sum"])
+
+
+class TestValidateGroupbyFields:
+    """Tests for _validate_groupby_fields (groupby with temporal operators)."""
+
+    # -- Valid groupby field names ------------------------------------------
+
+    def test_valid_plain_field(self) -> None:
+        result = _validate_groupby_fields(["state"])
+        assert result == ["state"]
+
+    def test_valid_temporal_month(self) -> None:
+        result = _validate_groupby_fields(["create_date:month"])
+        assert result == ["create_date:month"]
+
+    def test_valid_temporal_quarter(self) -> None:
+        result = _validate_groupby_fields(["date:quarter"])
+        assert result == ["date:quarter"]
+
+    def test_valid_temporal_week(self) -> None:
+        result = _validate_groupby_fields(["date:week"])
+        assert result == ["date:week"]
+
+    def test_valid_temporal_day(self) -> None:
+        result = _validate_groupby_fields(["date:day"])
+        assert result == ["date:day"]
+
+    def test_valid_temporal_year(self) -> None:
+        result = _validate_groupby_fields(["date:year"])
+        assert result == ["date:year"]
+
+    def test_valid_mixed_plain_and_temporal(self) -> None:
+        result = _validate_groupby_fields(["state", "create_date:month"])
+        assert result == ["state", "create_date:month"]
+
+    def test_valid_dotted_field(self) -> None:
+        result = _validate_groupby_fields(["partner_id.name"])
+        assert result == ["partner_id.name"]
+
+    def test_empty_list(self) -> None:
+        result = _validate_groupby_fields([])
+        assert result == []
+
+    # -- Invalid groupby field names ----------------------------------------
+
+    def test_rejects_invalid_temporal_operator(self) -> None:
+        with pytest.raises(ValueError, match="Invalid field name"):
+            _validate_groupby_fields(["date:sum"])
+
+    def test_rejects_uppercase_temporal_operator(self) -> None:
+        with pytest.raises(ValueError, match="Invalid field name"):
+            _validate_groupby_fields(["date:MONTH"])
+
+    def test_rejects_double_colon(self) -> None:
+        with pytest.raises(ValueError, match="Invalid field name"):
+            _validate_groupby_fields(["date::month"])
+
+    def test_rejects_leading_digit(self) -> None:
+        with pytest.raises(ValueError, match="Invalid field name"):
+            _validate_groupby_fields(["123:month"])
+
+    def test_rejects_sql_injection_semicolon(self) -> None:
+        with pytest.raises(ValueError, match="Invalid field name"):
+            _validate_groupby_fields(["name; DROP TABLE"])
+
+    def test_rejects_sql_injection_comment(self) -> None:
+        with pytest.raises(ValueError, match="Invalid field name"):
+            _validate_groupby_fields(["name--injection"])
+
+    def test_rejects_sql_injection_quote(self) -> None:
+        with pytest.raises(ValueError, match="Invalid field name"):
+            _validate_groupby_fields(["name' OR '1'='1"])

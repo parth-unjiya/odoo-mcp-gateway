@@ -137,6 +137,22 @@ class TestSearchReadBasic:
         call_kwargs = mock_client.execute_kw.call_args[0][3]
         assert call_kwargs["offset"] == 20
 
+    async def test_field_inspection_failure_uses_safe_minimal_fields(self) -> None:
+        """When field inspector raises, fall back to id+display_name only."""
+        mock_client = make_mock_client(
+            execute_kw_return=[{"id": 1, "display_name": "T"}],
+        )
+        gateway = make_gateway(mock_client=mock_client)
+        # Force field inspector to raise
+        from unittest.mock import AsyncMock
+        gateway.field_inspector.get_fields = AsyncMock(side_effect=RuntimeError("oops"))
+        fn = _get_tool(gateway)
+        resp = await fn(model="res.partner")
+        assert "records" in resp
+        # Verify execute_kw was called with the safe minimal set
+        call_kwargs = mock_client.execute_kw.call_args[0][3]
+        assert call_kwargs["fields"] == ["id", "display_name"]
+
 
 class TestSearchReadSecurity:
     async def test_blocked_model_returns_error(self) -> None:
@@ -155,13 +171,13 @@ class TestSearchReadSecurity:
     async def test_admin_only_model_as_non_admin(self) -> None:
         gateway = make_gateway(
             restriction_config=RestrictionConfig(
-                admin_only=["res.users"],
+                admin_only=["res.groups"],
             ),
             is_admin=False,
         )
 
         fn = _get_tool(gateway)
-        resp = await fn(model="res.users", fields=["login"])
+        resp = await fn(model="res.groups", fields=["name"])
 
         assert "error" in resp
         assert "administrator" in resp["error"]

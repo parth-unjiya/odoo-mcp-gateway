@@ -20,7 +20,11 @@ from odoo_mcp_gateway.core.security.config_loader import (
     load_config,
 )
 from odoo_mcp_gateway.core.security.middleware import SecurityMiddleware
-from odoo_mcp_gateway.core.security.rate_limit import RateLimiter
+from odoo_mcp_gateway.core.security.rate_limit import (
+    LoginIpRateLimiter,
+    LoginRateLimiter,
+    RateLimiter,
+)
 from odoo_mcp_gateway.core.security.rbac import RBACManager
 from odoo_mcp_gateway.core.security.restrictions import RestrictionChecker
 from odoo_mcp_gateway.core.security.sanitizer import ErrorSanitizer
@@ -28,9 +32,17 @@ from odoo_mcp_gateway.core.security.sanitizer import ErrorSanitizer
 logger = logging.getLogger(__name__)
 
 # ContextVar for per-request session isolation in HTTP mode.
-# Each MCP tool handler sets this to the current session's key
-# so that _get_client / _get_auth_manager can retrieve the
-# correct AuthManager from the gateway's auth_managers dict.
+#
+# WARNING: HTTP mode (streamable-http transport) currently has KNOWN session
+# isolation limitations. The contextvar is only set inside the login tool;
+# subsequent tool calls in different request contexts may resolve to the
+# first available session via _get_client/_get_auth_manager fallback.
+#
+# For multi-tenant HTTP deployments, proper per-request session resolution
+# middleware is required (TODO). Until that is implemented, deploy HTTP mode
+# as SINGLE-TENANT only — one user per server process.
+#
+# stdio mode is single-session by design and not affected by this limitation.
 _current_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_current_session_key", default=None
 )
@@ -55,6 +67,8 @@ class GatewayContext:
             global_rate=settings.rate_limit_global,
             write_rate=settings.rate_limit_write,
         )
+        self.login_rate_limiter = LoginRateLimiter()
+        self.login_ip_rate_limiter = LoginIpRateLimiter()
         self.audit_logger = AuditLogger(
             backend="logger",
         )
@@ -246,6 +260,9 @@ def create_server(settings: Settings) -> FastMCP:
         plugin_registry.register_plugin(SalesPlugin)
         plugin_registry.register_plugin(ProjectPlugin)
         plugin_registry.register_plugin(HelpdeskPlugin)
+
+    # Store the registry on the gateway so auth.py can check requirements
+    gateway.plugin_registry = plugin_registry  # type: ignore[attr-defined]
 
     # Activate all enabled plugins
     activated = plugin_registry.activate(server, gateway)

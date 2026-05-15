@@ -9,7 +9,7 @@ from typing import Any
 import defusedxml.ElementTree as _safe_ET
 import httpx
 
-from odoo_mcp_gateway.client.base import AuthResult, OdooClientBase
+from odoo_mcp_gateway.client.base import AuthResult, Credential, OdooClientBase
 from odoo_mcp_gateway.client.exceptions import (
     OdooAccessError,
     OdooAuthError,
@@ -170,7 +170,7 @@ class XmlRpcClient(OdooClientBase):
 
         self._db: str | None = None
         self._uid: int | None = None
-        self._password: str | None = None
+        self._password: Credential = Credential(None)
 
     async def _call(self, endpoint: str, method: str, params: list[Any]) -> Any:
         body = _build_request(method, params)
@@ -209,7 +209,7 @@ class XmlRpcClient(OdooClientBase):
 
         self._db = db
         self._uid = uid_int
-        self._password = password
+        self._password = Credential(password)
 
         return AuthResult(
             uid=uid_int,
@@ -228,13 +228,14 @@ class XmlRpcClient(OdooClientBase):
         args: list[Any],
         kwargs: dict[str, Any] | None = None,
     ) -> Any:
-        if self._db is None or self._uid is None or self._password is None:
+        password_str = self._password.reveal()
+        if self._db is None or self._uid is None or password_str is None:
             raise OdooAuthError("Not authenticated. Call authenticate() first.")
         kw = kwargs or {}
         return await self._call(
             "/xmlrpc/2/object",
             "execute_kw",
-            [self._db, self._uid, self._password, model, method, args, kw],
+            [self._db, self._uid, password_str, model, method, args, kw],
         )
 
     async def get_version(self) -> dict[str, Any]:
@@ -250,5 +251,6 @@ class XmlRpcClient(OdooClientBase):
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
-        self._password = None
+        self._password.clear()
         self._db = None
+        self._uid = None

@@ -27,6 +27,21 @@ _ALWAYS_BLOCKED_METHODS: frozenset[str] = frozenset(
         "init",
         "_table_query",
         "_read_group_raw",
+        # Bulk import/export — bypass field-level RBAC and validations
+        "name_create",        # creates records bypassing many validations
+        "load",               # bulk CSV-like load that can write any field
+        "import_data",        # bulk import path bypassing ORM guards
+        "export_data",        # bulk export path bypassing field RBAC
+        # Cache poisoning vectors (Odoo 16+)
+        "flush_recordset",    # forces cache flush, can affect concurrent ops
+        "invalidate_recordset",  # cache invalidation; reachable side-effects
+        # Internal search-panel helpers (Odoo 14+) — leak data via aggregates
+        "_search_panel_select_range",
+        "_search_panel_select_multi_range",
+        "_search_panel_domain_image",
+        # Underscored search/aggregation internals
+        "_search",            # internal search bypassing public search filters
+        "_read_progress_bar", # progress-bar aggregation can leak counts
     }
 )
 
@@ -36,6 +51,8 @@ _ALWAYS_BLOCKED_METHODS: frozenset[str] = frozenset(
 _ALWAYS_BLOCKED_MODELS: frozenset[str] = frozenset(
     {
         "ir.config_parameter",
+        "ir.attachment",  # SSRF risk via file:// URLs, path traversal
+        "res.users",
         "res.users.apikeys",
         "change.password.wizard",
         "change.password.user",
@@ -49,9 +66,67 @@ _ALWAYS_BLOCKED_MODELS: frozenset[str] = frozenset(
         "base.module.update",
         "base.module.upgrade",
         "base.module.uninstall",
+        "base.automation",  # can trigger server actions (arbitrary code)
         "res.config.settings",
         "fetchmail.server",
         "bus.bus",
+        "mail.mail",
+        "mail.template",  # email templates with portal URLs (phishing enabler)
+        "payment.token",  # stored credit cards / payment methods
+        "payment.provider",  # payment gateway API keys and secrets
+        # 2FA / TOTP enrollment — attacker could enroll their own TOTP device
+        "auth.totp.wizard",
+        "auth.totp.device",
+        # Login history / security telemetry
+        "res.users.log",  # login timestamps, IPs (security telemetry leak)
+        "ir.logging",  # server log entries (stack traces, SQL fragments)
+        # IAP (In-App Purchase) tokens / Odoo cloud services
+        "iap.account",  # IAP API tokens with credit balances
+        # Bulk data export models
+        "ir.exports",  # saved export configurations (data exfil vector)
+        "ir.exports.line",  # column definitions for ir.exports
+        # Bulk system mailings
+        "digest.digest",  # automated digest mailings (abuse / spoof vector)
+    }
+)
+
+# Non-configurable set of models that are always read-only through the gateway.
+# Reads are allowed (Odoo's ir.rule enforces per-user record access),
+# but creates/writes/deletes are blocked to prevent message injection,
+# fake follower manipulation, and activity spoofing.
+_ALWAYS_READ_ONLY_MODELS: frozenset[str] = frozenset(
+    {
+        "mail.message",
+        "mail.followers",
+        "mail.activity",
+        "discuss.channel",
+        # Notification model — writing here enables notification spoofing
+        "mail.notification",
+        # Email composition wizard — abuse vector for sending arbitrary emails
+        "mail.compose.message",
+        # Email forwarding aliases — hijack vector (redirect inbound mail)
+        "mail.alias",
+        # Channel membership manipulation (Odoo 17+ name)
+        "discuss.channel.member",
+    }
+)
+
+
+# Non-configurable set of fields that must never be writable through the
+# gateway.  These protect against privilege escalation and account takeover
+# even when no YAML config is deployed.
+_ALWAYS_BLOCKED_WRITE_FIELDS: frozenset[str] = frozenset(
+    {
+        "password",
+        "password_crypt",
+        "groups_id",
+        "totp_secret",
+        "signup_token",
+        "signup_type",
+        "signup_expiration",
+        "api_key",
+        "share",
+        "active",
     }
 )
 
@@ -69,7 +144,9 @@ class RestrictionChecker:
         self._admin_only: set[str] = set(config.admin_only)
         self._admin_write_only: set[str] = set(config.admin_write_only)
         self._blocked_methods: set[str] = set(config.blocked_methods)
-        self._blocked_write_fields: set[str] = set(config.blocked_write_fields)
+        self._blocked_write_fields: set[str] = (
+            set(config.blocked_write_fields) | _ALWAYS_BLOCKED_WRITE_FIELDS
+        )
         self._model_access = model_access
 
         # Build merged model access sets from stock + custom models
@@ -97,6 +174,16 @@ class RestrictionChecker:
         # 0. Hard-coded always-blocked models (cannot be overridden, blocks everyone)
         if model in _ALWAYS_BLOCKED_MODELS:
             return f"Access denied: '{model}' is always blocked"
+
+        # 0a. Hard-coded read-only models — reads OK, writes blocked for everyone
+        if model in _ALWAYS_READ_ONLY_MODELS:
+            if operation in {"create", "write", "delete"}:
+                return (
+                    f"Access denied: '{model}' is read-only through the gateway. "
+                    "Use workflow actions (e.g., action_quotation_send) to send "
+                    "messages through proper Odoo channels."
+                )
+            return None
 
         # 1. always_blocked -> denied for everyone
         if model in self._always_blocked:
@@ -153,20 +240,33 @@ class RestrictionChecker:
         if method in self._blocked_methods:
             return f"Method '{method}' is not allowed through the gateway"
 
-        # 2. Private methods (underscore prefix) -> admin only
-        if method.startswith("_") and not is_admin:
-            return "Private methods require administrator access"
+        # 2. Private methods (underscore prefix) — blocked for EVERYONE unless
+        # explicitly whitelisted per-model. Admin should not be a wildcard for
+        # internal methods (e.g. _compute_*, _inverse_*, _constrains_*, custom
+        # _unsafe_helper) since these are not part of the public API and may
+        # bypass business-logic guards.
+        if method.startswith("_"):
+            allowed = self._allowed_methods.get(model, [])
+            if method not in allowed:
+                return (
+                    f"Private method '{method}' is not whitelisted for model "
+                    f"'{model}'. Internal Odoo methods cannot be called via "
+                    "the gateway unless explicitly listed in "
+                    "model_access.yaml allowed_methods."
+                )
+            # Falls through to step 3 — explicit whitelist already authorises.
 
-        # 3. Check allowed_methods for the model
+        # 3. Check allowed_methods for the model (for non-admin users)
         if model in self._allowed_methods:
-            if method not in self._allowed_methods[model]:
-                if not is_admin:
-                    return (
-                        f"Method '{method}' is not in the allowed list "
-                        f"for model '{model}'"
-                    )
-        elif not is_admin:
-            # Model has no allowed_methods entry -> block non-admin
+            if method not in self._allowed_methods[model] and not is_admin:
+                return (
+                    f"Method '{method}' is not in the allowed list "
+                    f"for model '{model}'"
+                )
+        elif not is_admin and not method.startswith("_"):
+            # Public method on a model with no allowed_methods entry — block
+            # non-admin. Private methods already passed the explicit-whitelist
+            # check above (they reach this branch only if whitelisted).
             return f"No methods are configured as allowed for model '{model}'"
 
         return None

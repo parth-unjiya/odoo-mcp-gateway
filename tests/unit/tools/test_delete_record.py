@@ -102,13 +102,13 @@ class TestDeleteRecord:
     async def test_admin_only_model_non_admin_fails(self) -> None:
         gateway = make_gateway(
             restriction_config=RestrictionConfig(
-                admin_only=["res.users"],
+                admin_only=["res.groups"],
             ),
             is_admin=False,
         )
 
         fn = _get_tool(gateway)
-        resp = await fn(model="res.users", record_id=1)
+        resp = await fn(model="res.groups", record_id=1)
 
         assert "error" in resp
         assert "administrator" in resp["error"]
@@ -117,13 +117,13 @@ class TestDeleteRecord:
         mock_client = make_mock_client(execute_kw_return=True)
         gateway = make_gateway(
             restriction_config=RestrictionConfig(
-                admin_only=["res.users"],
+                admin_only=["res.groups"],
             ),
             mock_client=mock_client,
             is_admin=True,
         )
 
         fn = _get_tool(gateway)
-        resp = await fn(model="res.users", record_id=1)
+        resp = await fn(model="res.groups", record_id=1)
 
         assert resp["success"] is True

@@ -156,3 +156,191 @@ class RateLimiter:
         self._buckets.pop(session_id, None)
         self._write_buckets.pop(session_id, None)
         self._access_times.pop(session_id, None)
+
+
+class LoginRateLimiter:
+    """Tracks failed login attempts and enforces lockout.
+
+    After ``max_failures`` consecutive failures for a username,
+    further attempts are blocked for ``lockout_seconds``.
+    A successful login resets the counter.
+    """
+
+    _max_entries: int = 10_000
+
+    def __init__(
+        self,
+        max_failures: int = 5,
+        lockout_seconds: int = 300,
+    ) -> None:
+        self._max_failures = max_failures
+        self._lockout_seconds = lockout_seconds
+        # username -> (failure_count, last_failure_timestamp)
+        self._failures: dict[str, tuple[int, float]] = {}
+
+    def _cleanup(self) -> None:
+        """Evict expired and oldest entries when the dict exceeds max size."""
+        now = time.monotonic()
+        # First pass: remove expired lockouts
+        expired = [
+            k for k, (count, ts) in self._failures.items()
+            if count >= self._max_failures and now - ts > self._lockout_seconds
+        ]
+        for k in expired:
+            del self._failures[k]
+
+        # Second pass: evict oldest if still over limit
+        if len(self._failures) > self._max_entries:
+            sorted_keys = sorted(
+                self._failures, key=lambda k: self._failures[k][1]
+            )
+            for k in sorted_keys[: len(self._failures) - self._max_entries]:
+                del self._failures[k]
+
+    def check_allowed(self, username: str) -> str | None:
+        """Check if login is allowed.
+
+        Returns error message if locked out, None if OK.
+        """
+        if not username:
+            return None
+        key = username.lower().strip()
+        if key not in self._failures:
+            return None
+        count, last_failure = self._failures[key]
+        if count < self._max_failures:
+            return None
+        elapsed = time.monotonic() - last_failure
+        remaining = self._lockout_seconds - elapsed
+        if remaining <= 0:
+            # Lockout expired, reset
+            del self._failures[key]
+            return None
+        minutes = int(remaining // 60) + 1
+        return (
+            f"Too many failed login attempts for '{username}'. "
+            f"Please wait {minutes} minute(s) before trying again."
+        )
+
+    def record_failure(self, username: str) -> None:
+        """Record a failed login attempt.
+
+        If the user is already locked out (count >= max_failures and the
+        lockout window hasn't expired), do NOT update the timestamp. This
+        prevents an attacker from perpetually extending another user's
+        lockout via repeated failed attempts (DoS primitive).
+        """
+        if not username:
+            return
+        key = username.lower().strip()
+        count, last_failure = self._failures.get(key, (0, 0.0))
+        # If already locked out, don't extend the lockout — keep the
+        # original timestamp so the lockout duration stays fixed.
+        if count >= self._max_failures:
+            elapsed = time.monotonic() - last_failure
+            if elapsed < self._lockout_seconds:
+                return  # Lockout in progress, don't extend it
+        self._failures[key] = (count + 1, time.monotonic())
+        # Cleanup AFTER insertion so the entry count reflects the new
+        # state (otherwise eviction lags by one insert).
+        self._cleanup()
+
+    def record_success(self, username: str) -> None:
+        """Reset failure counter on successful login."""
+        if not username:
+            return
+        key = username.lower().strip()
+        self._failures.pop(key, None)
+
+
+class LoginIpRateLimiter:
+    """Tracks failed login attempts per source (IP/connection) to prevent
+    username-rotation attacks.
+
+    The per-username ``LoginRateLimiter`` alone is bypassed by an attacker
+    who rotates usernames (e.g. 4 attempts each across 1000 usernames).
+    This limiter tracks failures per source identifier (IP, session_id, or
+    any caller-provided key) with a higher threshold than per-username,
+    since multiple legitimate users may share an IP behind NAT.
+    """
+
+    _max_entries: int = 10_000
+
+    def __init__(
+        self,
+        max_failures: int = 30,
+        lockout_seconds: int = 900,  # 15 minutes
+    ) -> None:
+        self._max_failures = max_failures
+        self._lockout_seconds = lockout_seconds
+        # source_id -> (failure_count, last_failure_timestamp)
+        self._failures: dict[str, tuple[int, float]] = {}
+
+    def _cleanup(self) -> None:
+        """Evict expired and oldest entries when the dict exceeds max size."""
+        now = time.monotonic()
+        # First pass: remove expired lockouts
+        expired = [
+            k for k, (count, ts) in self._failures.items()
+            if count >= self._max_failures and now - ts > self._lockout_seconds
+        ]
+        for k in expired:
+            del self._failures[k]
+
+        # Second pass: evict oldest if still over limit
+        if len(self._failures) > self._max_entries:
+            sorted_keys = sorted(
+                self._failures, key=lambda k: self._failures[k][1]
+            )
+            for k in sorted_keys[: len(self._failures) - self._max_entries]:
+                del self._failures[k]
+
+    def check_allowed(self, source_id: str) -> str | None:
+        """Check if login is allowed from this source.
+
+        Returns error message if the source is locked out, None if OK.
+        """
+        if not source_id:
+            return None
+        key = source_id.strip()
+        if key not in self._failures:
+            return None
+        count, last_failure = self._failures[key]
+        if count < self._max_failures:
+            return None
+        elapsed = time.monotonic() - last_failure
+        remaining = self._lockout_seconds - elapsed
+        if remaining <= 0:
+            # Lockout expired, reset
+            del self._failures[key]
+            return None
+        minutes = int(remaining // 60) + 1
+        return (
+            f"Too many failed login attempts from this source. "
+            f"Please wait {minutes} minute(s) before trying again."
+        )
+
+    def record_failure(self, source_id: str) -> None:
+        """Record a failed login attempt from this source.
+
+        Same fixed-duration lockout semantics as ``LoginRateLimiter``: if
+        the source is already locked out, do not extend the lockout.
+        """
+        if not source_id:
+            return
+        key = source_id.strip()
+        count, last_failure = self._failures.get(key, (0, 0.0))
+        if count >= self._max_failures:
+            elapsed = time.monotonic() - last_failure
+            if elapsed < self._lockout_seconds:
+                return  # Lockout in progress, don't extend it
+        self._failures[key] = (count + 1, time.monotonic())
+        # Cleanup AFTER insertion so the entry count reflects the new state.
+        self._cleanup()
+
+    def record_success(self, source_id: str) -> None:
+        """Reset failure counter on successful login from this source."""
+        if not source_id:
+            return
+        key = source_id.strip()
+        self._failures.pop(key, None)

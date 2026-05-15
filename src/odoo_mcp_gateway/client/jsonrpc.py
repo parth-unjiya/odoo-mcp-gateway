@@ -8,13 +8,14 @@ from typing import Any
 
 import httpx
 
-from odoo_mcp_gateway.client.base import AuthResult, OdooClientBase
+from odoo_mcp_gateway.client.base import AuthResult, Credential, OdooClientBase
 from odoo_mcp_gateway.client.exceptions import (
     OdooAccessError,
     OdooAuthError,
     OdooConnectionError,
     OdooError,
     OdooMissingError,
+    OdooSessionExpiredError,
     OdooUserError,
     OdooValidationError,
 )
@@ -28,7 +29,19 @@ _EXCEPTION_MAP: dict[str, type[OdooError]] = {
     "odoo.exceptions.ValidationError": OdooValidationError,
     "odoo.exceptions.UserError": OdooUserError,
     "odoo.exceptions.MissingError": OdooMissingError,
+    # Session expiry is signalled by Odoo's web layer. Map it to a dedicated
+    # subclass of OdooAuthError so retry logic can target it specifically
+    # without also retrying on legitimate access-denied errors.
+    "odoo.http.SessionExpiredException": OdooSessionExpiredError,
 }
+
+# Substrings (lower-cased) that indicate a session-expiry condition when the
+# server-side exception name is missing or unrecognised.
+_SESSION_EXPIRED_MARKERS: tuple[str, ...] = (
+    "session expired",
+    "sessionexpired",
+    "session_expired",
+)
 
 
 class JsonRpcClient(OdooClientBase):
@@ -51,8 +64,8 @@ class JsonRpcClient(OdooClientBase):
         # Stored credentials for automatic re-auth on session expiry.
         self._db: str | None = None
         self._login: str | None = None
-        self._password: str | None = None
-        self._session_id: str | None = None
+        self._password: Credential = Credential(None)
+        self._session_id: Credential = Credential(None)
         self._uid: int | None = None
 
         self._rpc_id = 0
@@ -66,8 +79,9 @@ class JsonRpcClient(OdooClientBase):
         return self._rpc_id
 
     def _build_cookies(self) -> dict[str, str]:
-        if self._session_id:
-            return {"session_id": self._session_id}
+        sid = self._session_id.reveal()
+        if sid:
+            return {"session_id": sid}
         return {}
 
     async def _rpc(self, path: str, params: dict[str, Any]) -> Any:
@@ -97,7 +111,7 @@ class JsonRpcClient(OdooClientBase):
         # Extract session cookie if present.
         sid = response.cookies.get("session_id")
         if sid:
-            self._session_id = sid
+            self._session_id = Credential(sid)
 
         try:
             data: dict[str, Any] = response.json()
@@ -122,8 +136,13 @@ class JsonRpcClient(OdooClientBase):
         if exc_cls is not None:
             raise exc_cls(message, code=exc_name)
 
-        # Fallback: if the message itself hints at session expiry, treat it
-        # as an auth error so the retry logic can kick in.
+        # Fallback: if the message itself hints at session expiry, surface it
+        # as a session-expired error so the retry logic can kick in even when
+        # Odoo doesn't send the canonical exception name.
+        lower_msg = message.lower()
+        if any(marker in lower_msg for marker in _SESSION_EXPIRED_MARKERS):
+            raise OdooSessionExpiredError(message, code=exc_name or None)
+
         raise OdooUserError(message, code=exc_name or None)
 
     # ------------------------------------------------------------------
@@ -133,7 +152,7 @@ class JsonRpcClient(OdooClientBase):
     async def authenticate(self, db: str, login: str, password: str) -> AuthResult:
         self._db = db
         self._login = login
-        self._password = password
+        self._password = Credential(password)
 
         result = await self._rpc(
             "/web/session/authenticate",
@@ -152,7 +171,7 @@ class JsonRpcClient(OdooClientBase):
 
         return AuthResult(
             uid=uid,
-            session_id=self._session_id,
+            session_id=self._session_id.reveal(),
             user_context=user_context,
             is_admin=is_admin,
             groups=[],
@@ -178,11 +197,15 @@ class JsonRpcClient(OdooClientBase):
                     "kwargs": kw,
                 },
             )
-        except OdooAuthError:
-            # Auto-retry once on session expiry.
-            if self._db and self._login and self._password:
+        except OdooSessionExpiredError:
+            # Auto-retry once on a *genuine* session-expiry signal. Other
+            # OdooAuthError subclasses (e.g. AccessDenied on a specific record)
+            # propagate without retry so we don't double Odoo load or mask
+            # legitimate access-control failures.
+            password_str = self._password.reveal()
+            if self._db and self._login and password_str:
                 logger.info("Session expired, re-authenticating...")
-                await self.authenticate(self._db, self._login, self._password)
+                await self.authenticate(self._db, self._login, password_str)
                 return await self._rpc(
                     "/web/dataset/call_kw",
                     {
@@ -201,6 +224,8 @@ class JsonRpcClient(OdooClientBase):
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
-        self._password = None
+        self._password.clear()
+        self._session_id.clear()
         self._login = None
         self._db = None
+        self._uid = None

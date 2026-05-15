@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.plugins.base import OdooPlugin
 from odoo_mcp_gateway.plugins.core.helpers import (
+    check_plugin_modules,
     check_security_gate,
     format_model_error,
     get_auth_info,
@@ -43,6 +44,8 @@ class HRPlugin(OdooPlugin):
 
     def register(self, server: FastMCP, context: Any) -> None:
         """Register HR tools on the MCP server."""
+        _plugin_name = self.name
+        _required_models = self.required_models
 
         @server.tool()
         async def check_in() -> dict[str, Any]:
@@ -54,6 +57,10 @@ class HRPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "check_in")
             if gate_error:
@@ -160,6 +167,10 @@ class HRPlugin(OdooPlugin):
             if client is None:
                 return {"error": "Not authenticated"}
 
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
+
             gate_error = await check_security_gate(context, "check_out")
             if gate_error:
                 return {"error": gate_error}
@@ -263,6 +274,10 @@ class HRPlugin(OdooPlugin):
             if client is None:
                 return {"error": "Not authenticated"}
 
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
+
             gate_error = await check_security_gate(context, "get_my_attendance")
             if gate_error:
                 return {"error": gate_error}
@@ -339,6 +354,10 @@ class HRPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "get_my_leaves")
             if gate_error:
@@ -426,6 +445,10 @@ class HRPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "request_leave")
             if gate_error:
@@ -520,6 +543,10 @@ class HRPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "get_my_profile")
             if gate_error:

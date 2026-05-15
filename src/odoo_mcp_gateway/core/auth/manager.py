@@ -186,6 +186,14 @@ class AuthManager:
         result = await self._fetch_groups(result)
         # Determine admin status via XML IDs (locale-independent).
         result = await self._detect_admin_via_xmlid(result)
+        # Verify admin status server-side (defense against tampered auth
+        # responses from a compromised proxy/MITM). The `has_group` call
+        # is executed as the authenticated user against Odoo, so a
+        # tampered auth payload cannot flip the bit.
+        verified_is_admin = await self._verify_admin_via_has_group(
+            self._get_active_client_unchecked()
+        )
+        result.is_admin = verified_is_admin
         self._auth_result = result
         self._touch_activity()
         return result
@@ -211,7 +219,8 @@ class AuthManager:
     async def _login_session(self, db: str, session_id: str) -> AuthResult:
         """Strategy C: Reuse existing browser session cookie."""
         # Inject the session cookie and ask Odoo for session info.
-        self._jsonrpc._session_id = session_id  # noqa: SLF001
+        from odoo_mcp_gateway.client.base import Credential
+        self._jsonrpc._session_id = Credential(session_id)  # noqa: SLF001
         try:
             info: dict[str, Any] = await self._jsonrpc._rpc(  # noqa: SLF001
                 "/web/session/get_session_info",
@@ -300,6 +309,33 @@ class AuthManager:
             except Exception:
                 logger.debug("has_group check failed for %s", xmlid, exc_info=True)
         return result
+
+    async def _verify_admin_via_has_group(self, client: OdooClientBase) -> bool:
+        """Verify admin status by calling ``res.users.has_group`` server-side.
+
+        This protects against a compromised proxy or MITM tampering with the
+        auth response payload (which previously sourced ``is_admin``). The
+        call is executed as the authenticated user against Odoo, so the
+        result reflects real group membership in the database.
+
+        Falls back to ``False`` if the check fails (fail-closed) — better to
+        downgrade a real admin's privileges than to grant admin to a user
+        whose status cannot be verified.
+        """
+        try:
+            result = await client.execute_kw(
+                "res.users",
+                "has_group",
+                ["base.group_system"],
+            )
+            return bool(result)
+        except Exception:
+            # Fail closed — if we can't verify, assume not admin.
+            logger.debug(
+                "Admin verification via has_group failed; defaulting to False",
+                exc_info=True,
+            )
+            return False
 
     def _get_active_client_unchecked(self) -> OdooClientBase:
         """Return the active client without timeout checks.

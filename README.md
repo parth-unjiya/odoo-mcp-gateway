@@ -5,8 +5,56 @@ Security-first, version-agnostic MCP gateway for Odoo 17/18/19. Works with stock
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Odoo](https://img.shields.io/badge/Odoo-17%20%7C%2018%20%7C%2019-714B67.svg)](https://www.odoo.com/)
+[![Tests](https://img.shields.io/badge/tests-1476%20passing-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-93%25-brightgreen.svg)](#testing)
 
 <!-- mcp-name: io.github.parth-unjiya/odoo-mcp-gateway -->
+
+## 30-Second Quick Start
+
+```bash
+pip install odoo-mcp-gateway
+```
+
+Add to Claude Desktop config (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "odoo": {
+      "command": "python",
+      "args": ["-m", "odoo_mcp_gateway"],
+      "env": {
+        "ODOO_URL": "http://localhost:8069",
+        "ODOO_DB": "your_database"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. In any conversation:
+
+```
+login with method "password", username "admin", credential "your_password"
+```
+
+You're connected. Ask Claude to query, create, or update Odoo records — every call is rate-limited, audit-logged, and runs through two layers of security checks before reaching Odoo.
+
+**No Odoo addon required. No Python code to write.** Just YAML config for fine-grained access control (optional — secure defaults work out of the box).
+
+## What's New in v0.2.1
+
+- **Brute-force protection** — per-username (5/5min) + per-source (30/15min) lockout
+- **`dry_run` mode** on `create_record`, `update_record`, `delete_record`, `execute_method` — validate without executing
+- **2 new tools**: `get_defaults` (preview Odoo defaults), `get_onchange` (preview field side effects)
+- **Temporal grouping** in `read_group`: `create_date:month`, `date:quarter`, etc.
+- **Hardened blocklists**: 32 always-blocked models (was 17), 29 always-blocked methods (was 18), 10 always-blocked write fields, 8 always read-only models
+- **Server-side admin verification** via `has_group('base.group_system')` (was trusted from auth response)
+- **Credential wrapper** prevents password leakage via `repr()`/traceback
+- **JSON-RPC retry** only fires on `OdooSessionExpiredError` (was retrying on every auth error)
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list of 21 security fixes.
 
 ## Why This Exists
 
@@ -17,7 +65,7 @@ Existing Odoo MCP servers share common problems: hardcoded model lists that miss
 - **Custom module support** — auto-discovers models via `ir.model`, add YAML config and it works
 - **Version-agnostic** — Odoo 17, 18, 19 with version-specific adapters
 - **Zero Odoo-side code** — `pip install` + YAML config = done. No custom addon required
-- **Full MCP primitives** — 29 Tools + 6 Resources + 12 Prompts (most servers only implement Tools)
+- **Full MCP primitives** — 31 Tools + 6 Resources + 12 Prompts (most servers only implement Tools)
 - **Plugin architecture** — extend with pip-installable domain packs via entry_points
 
 ## Architecture
@@ -32,7 +80,7 @@ MCP Server (FastMCP)
     |-- restrictions       --> Model/method/field block lists (YAML + hardcoded)
     |-- rbac               --> Field-level filtering + write sanitization
     |
-    |-- tools/             --> 29 MCP tools (auth + schema + CRUD + workflow + plugins)
+    |-- tools/             --> 31 MCP tools (auth + schema + CRUD + workflow + plugins)
     |-- resources/         --> 6 MCP resources (odoo:// URIs)
     |-- prompts/           --> 12 reusable prompt templates
     |-- plugins/           --> Entry-point plugin system (HR, Sales, Project, Helpdesk)
@@ -53,9 +101,15 @@ Request --> Rate Limit --> Authentication Check --> RBAC Tool Access
 ```
 
 Hardcoded safety guardrails that cannot be overridden by YAML:
-- **17 always-blocked models** (ir.config_parameter, ir.cron, ir.module.module, ir.rule, ir.mail_server, etc.)
-- **18 always-blocked methods** (sudo, with_user, with_env, _sql, _write, _create, etc.)
+- **32 always-blocked models** — system internals, auth/TOTP, payment tokens, attachments, mail.mail, base.automation, and more
+- **8 always read-only models** — mail.message, mail.followers, mail.activity, discuss.channel, mail.notification, mail.compose.message, mail.alias, discuss.channel.member (reads OK, writes blocked for everyone)
+- **10 always-blocked write fields** — password, password_crypt, groups_id, totp_secret, signup_token/type/expiration, api_key, share, active
+- **29 always-blocked methods** — sudo, with_user/env/context, _sql, _write, _create, name_create, load, import_data, export_data, and more
 - **28 ORM methods blocked in execute_method** (prevents bypassing field-level checks)
+- **Per-username brute-force lockout** — 5 failures → 5 minute lockout (fixed duration, cannot be extended)
+- **Per-source brute-force lockout** — 30 failures / 15 min, prevents username-rotation attacks
+- **Credential wrapper class** — passwords stored with leak-safe `__repr__`/`__str__`, cleared on close
+- **Server-side admin verification** — `has_group('base.group_system')` overrides auth-response `is_admin`
 
 ## Quick Start
 
@@ -139,20 +193,29 @@ claude mcp add odoo -- python -m odoo_mcp_gateway
 
 These cannot be overridden by YAML configuration:
 
-**Blocked models** (17): `ir.config_parameter`, `res.users.apikeys`, `ir.cron`, `ir.module.module`, `ir.model.access`, `ir.rule`, `ir.mail_server`, `ir.ui.view`, `ir.actions.server`, `res.config.settings`, `change.password.wizard`, `change.password.user`, `base.module.update`, `base.module.upgrade`, `base.module.uninstall`, `fetchmail.server`, `bus.bus`
+**Blocked models** (32): `ir.config_parameter`, `res.users`, `res.users.apikeys`, `res.users.log`, `ir.cron`, `ir.module.module`, `ir.model.access`, `ir.rule`, `ir.mail_server`, `ir.ui.view`, `ir.actions.server`, `ir.logging`, `ir.attachment`, `ir.exports`, `ir.exports.line`, `iap.account`, `auth.totp.wizard`, `auth.totp.device`, `payment.token`, `payment.provider`, `base.automation`, `digest.digest`, `res.config.settings`, `change.password.wizard`, `change.password.user`, `base.module.update`, `base.module.upgrade`, `base.module.uninstall`, `fetchmail.server`, `bus.bus`, `mail.mail`, `mail.template`
 
-**Blocked methods** (18): `sudo`, `with_user`, `with_company`, `with_context`, `with_env`, `with_prefetch`, `_auto_init`, `_sql`, `_register_hook`, `_write`, `_create`, `_read`, `_setup_base`, `_setup_fields`, `_setup_complete`, `init`, `_table_query`, `_read_group_raw`
+**Read-only models** (8): `mail.message`, `mail.followers`, `mail.activity`, `discuss.channel`, `mail.notification`, `mail.compose.message`, `mail.alias`, `discuss.channel.member` (reads allowed, writes blocked for everyone)
+
+**Blocked write fields** (10): `password`, `password_crypt`, `groups_id`, `totp_secret`, `signup_token`, `signup_type`, `signup_expiration`, `api_key`, `share`, `active`
+
+**Blocked methods** (29): `sudo`, `with_user`, `with_company`, `with_context`, `with_env`, `with_prefetch`, `_auto_init`, `_sql`, `_register_hook`, `_write`, `_create`, `_read`, `_setup_base`, `_setup_fields`, `_setup_complete`, `init`, `_table_query`, `_read_group_raw`, `name_create`, `load`, `import_data`, `export_data`, `flush_recordset`, `invalidate_recordset`, `_search_panel_select_range`, `_search_panel_select_multi_range`, `_search_panel_domain_image`, `_search`, `_read_progress_bar`
 
 ### Additional Security Features
 
+- **Brute-force protection** — per-username lockout (5 fails → 5 min) AND per-source IP/connection lockout (30 fails → 15 min, blocks username-rotation attacks). Lockouts have fixed duration — cannot be extended by additional attempts (DoS-resistant).
+- **Credential wrapper** — passwords/session IDs stored in a `Credential` class with leak-safe `__repr__`/`__str__`, explicit `.reveal()` for use, and `.clear()` on close
+- **Server-side admin verification** — `is_admin` is re-verified via `has_group('base.group_system')` after authentication, defending against tampered auth responses
+- **Private method guard** — underscore-prefixed methods (`_compute_*`, `_inverse_*`, etc.) blocked for everyone including admin unless explicitly whitelisted
 - **Rate limiting** — per-session token bucket with separate global and write budgets
-- **RBAC** — tool-level access control by user group, field-level response filtering
-- **Input validation** — model names, method names, field names, domain filters, ORDER BY clauses, write values (size/depth/type)
+- **RBAC** — tool-level access control by user group, field-level response filtering, transparent drop reporting via `return_dropped=True`
+- **Input validation** — model names, method names, field names, domain filters, ORDER BY clauses, groupby with temporal operators, write values (size/depth/type)
 - **IDOR protection** — plugin tools scope data access to the authenticated user
 - **Audit logging** — structured JSON logs for all allowed and denied operations
 - **Error sanitization** — strips internal URLs, SQL fragments, file paths, stack traces from error messages
 - **XXE protection** — XML-RPC responses parsed with `defusedxml`
 - **Domain validation** — Odoo domain filters validated for operators, field names, value types, nesting depth, and list sizes
+- **Session-expiry retry** — JSON-RPC retries only on `OdooSessionExpiredError`, not generic auth errors (no double round-trips on access denials)
 
 ## Authentication
 
@@ -169,7 +232,7 @@ Three stock Odoo auth methods — no custom addon needed:
 > login(method="password", username="admin", credential="admin", database="mydb")
 ```
 
-## Core MCP Tools (11)
+## Core MCP Tools (13)
 
 | Tool | Description |
 |------|-------------|
@@ -179,11 +242,13 @@ Three stock Odoo auth methods — no custom addon needed:
 | `search_read` | Search records with domain filters, field selection, ordering |
 | `get_record` | Get a single record by ID |
 | `search_count` | Count matching records |
-| `create_record` | Create a new record (validates field names and values) |
-| `update_record` | Update existing record (validates field names and values) |
-| `delete_record` | Delete a single record by ID |
-| `read_group` | Aggregated grouped reads with aggregate functions |
-| `execute_method` | Call allowed model methods (validates method name) |
+| `create_record` | Create a new record (supports `dry_run` for validation-only) |
+| `update_record` | Update existing record (supports `dry_run` for validation-only) |
+| `delete_record` | Delete a single record by ID (supports `dry_run`) |
+| `read_group` | Aggregated grouped reads with temporal operators (`date:month`, `date:quarter`, etc.) |
+| `get_defaults` | Preview Odoo default values before `create_record` |
+| `get_onchange` | Preview field side effects (with RBAC filtering) |
+| `execute_method` | Call allowed model methods (supports `dry_run`) |
 
 ## Workflow Tools (2)
 
@@ -453,14 +518,14 @@ src/odoo_mcp_gateway/
 
 ## Testing
 
-1,300+ tests across all layers with 94% code coverage:
+**1,476 tests passing, 93% code coverage**, mypy strict clean, ruff clean:
 
 ```
 tests/unit/
 ├── client/          # JSON-RPC, XML-RPC, auth manager, XXE protection
 ├── security/        # Restrictions, RBAC, audit, rate limit, sanitizer, security_gate
 ├── discovery/       # Model registry, field inspector, suggestions
-├── tools/           # All 11 MCP tools + input validation
+├── tools/           # All 13 MCP tools + input validation + dry_run
 ├── plugins/         # Plugin system + 4 domain plugins + IDOR protection
 └── cli/             # CLI utility tools
 ```
@@ -496,7 +561,8 @@ All error messages are sanitized before reaching the MCP client — internal URL
 
 ## Known Limitations
 
-- **XML-RPC credential handling**: When using API key authentication (XML-RPC), the credential is sent with every RPC call as required by the protocol. Use HTTPS in production.
+- **XML-RPC credential handling**: When using API key authentication (XML-RPC), the credential is sent with every RPC call as required by the protocol. Use HTTPS in production. (Note: passwords are stored in a `Credential` wrapper that prevents `repr()`/traceback leakage.)
+- **HTTP mode session isolation**: `streamable-http` transport currently has known session isolation limitations — the `_current_session_key` ContextVar is set inside the login tool but subsequent tool calls from different request contexts may fall back to the first available session. **Deploy HTTP mode as single-tenant only** (one user per server process) until per-request middleware lands in v0.3.0. stdio mode is single-session by design and unaffected.
 
 ## Contributing
 

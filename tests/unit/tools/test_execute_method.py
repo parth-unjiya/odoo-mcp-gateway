@@ -161,8 +161,59 @@ class TestExecuteMethodBlocked:
         assert "error" in resp
         assert "not allowed" in resp["error"]
 
-    async def test_private_method_as_non_admin_fails(self) -> None:
+    async def test_private_method_non_admin_fails_when_not_whitelisted(self) -> None:
+        """Private method NOT in allowed_methods is blocked for non-admin."""
         gateway = make_gateway(
+            is_admin=False,
+            model_access_config=_model_access_with_methods(
+                {"sale.order": ["action_confirm"]},
+            ),
+        )
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            method="_compute_total",
+            record_ids=[1],
+        )
+
+        assert "error" in resp
+        assert (
+            "Private method" in resp["error"]
+            or "not whitelisted" in resp["error"]
+        )
+
+    async def test_private_method_admin_fails_when_not_whitelisted(self) -> None:
+        """Admin is NOT a wildcard for underscore-prefixed methods.
+
+        Even admin must have the private method explicitly whitelisted in
+        model_access.yaml allowed_methods, otherwise the call is rejected.
+        """
+        gateway = make_gateway(
+            is_admin=True,
+            model_access_config=_model_access_with_methods(
+                {"sale.order": ["action_confirm"]},
+            ),
+        )
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            method="_compute_total",
+            record_ids=[1],
+        )
+
+        assert "error" in resp
+        assert (
+            "Private method" in resp["error"]
+            or "not whitelisted" in resp["error"]
+        )
+
+    async def test_private_method_non_admin_succeeds_when_whitelisted(self) -> None:
+        """Whitelisted private methods are callable by non-admin users."""
+        mock_client = make_mock_client(execute_kw_return=True)
+        gateway = make_gateway(
+            mock_client=mock_client,
             is_admin=False,
             model_access_config=_model_access_with_methods(
                 {"sale.order": ["_compute_total"]},
@@ -176,8 +227,7 @@ class TestExecuteMethodBlocked:
             record_ids=[1],
         )
 
-        assert "error" in resp
-        assert "Private methods" in resp["error"] or "administrator" in resp["error"]
+        assert "result" in resp
 
     async def test_private_method_as_admin_succeeds(self) -> None:
         mock_client = make_mock_client(execute_kw_return=True)

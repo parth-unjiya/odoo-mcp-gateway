@@ -170,7 +170,7 @@ class TestAuthenticate:
         await client.authenticate("db", "u", "p")
         assert client._db == "db"
         assert client._uid == 1
-        assert client._password == "p"
+        assert client._password.reveal() == "p"
 
 
 # ------------------------------------------------------------------
@@ -305,3 +305,56 @@ class TestClose:
         client._owns_client = False
         await client.close()
         mock.aclose.assert_not_called()
+
+    async def test_close_clears_credentials(self) -> None:
+        """close() must zero out password, db, and uid."""
+        resp = _resp(_success_xml("<value><int>1</int></value>"))
+        mock = _mock_client([resp])
+        client = XmlRpcClient(_URL, httpx_client=mock)
+        await client.authenticate("db", "u", "secret_pwd")
+
+        await client.close()
+
+        assert client._password.reveal() is None
+        assert client._db is None
+        assert client._uid is None
+
+
+# ------------------------------------------------------------------
+# Credential leak protection
+# ------------------------------------------------------------------
+
+
+class TestCredentialLeakProtection:
+    async def test_password_not_in_repr(self) -> None:
+        """Credential should never appear in repr() of the client."""
+        from odoo_mcp_gateway.client.base import Credential
+        from odoo_mcp_gateway.client.xmlrpc import XmlRpcClient
+
+        client = XmlRpcClient(base_url="http://test:8069")
+        # Manually set password (don't actually authenticate)
+        client._password = Credential("super_secret_pwd_12345")
+
+        # Neither repr nor str should leak it
+        assert "super_secret_pwd_12345" not in repr(client._password)
+        assert "super_secret_pwd_12345" not in str(client._password)
+        assert "***" in repr(client._password) or "Credential" in repr(client._password)
+
+    async def test_credential_clear_zeroes_value(self) -> None:
+        from odoo_mcp_gateway.client.base import Credential
+
+        cred = Credential("topsecret")
+        assert cred.is_set()
+        assert cred.reveal() == "topsecret"
+        cred.clear()
+        assert cred.reveal() is None
+        assert not cred.is_set()
+        assert "topsecret" not in repr(cred)
+        assert "topsecret" not in str(cred)
+
+    async def test_credential_unset_repr(self) -> None:
+        from odoo_mcp_gateway.client.base import Credential
+
+        cred = Credential(None)
+        assert "unset" in repr(cred)
+        assert bool(cred) is False

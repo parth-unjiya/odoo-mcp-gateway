@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, overload
 
 from .config_loader import ModelAccessConfig, RBACConfig
 
@@ -58,6 +58,13 @@ class RBACManager:
 
         Returns a new list of records with redacted values.
         Admin sees all fields unredacted.
+
+        TODO: This only redacts top-level fields. Nested records returned by
+        Odoo's `web_read` (or recursive `read` with relational expansions) can
+        slip through unredacted. Since `web_read` isn't currently exposed via
+        the gateway tools, this is acceptable, but if/when it is, the
+        redaction needs to recurse into nested dicts/lists keyed by relational
+        field metadata. Track this when adding `web_read` support.
         """
         if is_admin:
             return records
@@ -77,27 +84,70 @@ class RBACManager:
 
         return result
 
+    @overload
     def sanitize_write_values(
         self,
         values: dict[str, Any],
         model: str,
         user_groups: list[str],
         is_admin: bool,
-    ) -> dict[str, Any]:
+        *,
+        return_dropped: Literal[False] = False,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def sanitize_write_values(
+        self,
+        values: dict[str, Any],
+        model: str,
+        user_groups: list[str],
+        is_admin: bool,
+        *,
+        return_dropped: Literal[True],
+    ) -> tuple[dict[str, Any], list[str]]: ...
+
+    def sanitize_write_values(
+        self,
+        values: dict[str, Any],
+        model: str,
+        user_groups: list[str],
+        is_admin: bool,
+        *,
+        return_dropped: bool = False,
+    ) -> dict[str, Any] | tuple[dict[str, Any], list[str]]:
         """Remove fields the user cannot write from the values dict.
 
         Returns a new dict with disallowed fields removed.
         Admin can write all fields.
+
+        When ``return_dropped`` is True, returns a tuple
+        ``(sanitized_dict, dropped_field_names)`` so callers can detect
+        silent drops (e.g. a user setting ``user_id`` on a helpdesk ticket
+        without the necessary group). By default the method still returns
+        just the sanitized dict for backward compatibility.
         """
         if is_admin:
-            return dict(values)
+            sanitized = dict(values)
+            if return_dropped:
+                return sanitized, []
+            return sanitized
 
         blocked = self._get_write_blocked_fields(model, user_groups)
 
         if not blocked:
-            return dict(values)
+            sanitized = dict(values)
+            if return_dropped:
+                return sanitized, []
+            return sanitized
 
-        return {k: v for k, v in values.items() if k not in blocked}
+        sanitized = {k: v for k, v in values.items() if k not in blocked}
+
+        if return_dropped:
+            # Preserve original key order from the input for deterministic output.
+            dropped = [k for k in values if k in blocked]
+            return sanitized, dropped
+
+        return sanitized
 
     def get_visible_fields(
         self,

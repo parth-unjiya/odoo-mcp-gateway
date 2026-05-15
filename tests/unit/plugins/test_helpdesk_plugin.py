@@ -204,6 +204,122 @@ class TestCreateTicket:
         assert "not available" in result["error"]
 
 
+# ── get_my_tickets state validation tests ────────────────────────
+
+
+class TestGetMyTicketsStateValidation:
+    """Verify the state filter input is validated before reaching Odoo."""
+
+    async def test_invalid_state_with_special_chars_rejected(
+        self, tools, mock_context
+    ):
+        """SQL-injection-like payloads must be rejected without hitting Odoo."""
+        _, client = mock_context
+        result = await tools["get_my_tickets"](state="'; DROP TABLE--")
+        assert result.get("error") == "Invalid state filter format"
+        # The search must never be issued
+        client.execute_kw.assert_not_called()
+
+    async def test_invalid_state_too_long_rejected(self, tools, mock_context):
+        """State strings beyond 64 chars are rejected."""
+        _, client = mock_context
+        result = await tools["get_my_tickets"](state="a" * 100)
+        assert result.get("error") == "Invalid state filter format"
+        client.execute_kw.assert_not_called()
+
+    async def test_invalid_state_empty_string_rejected(self, tools, mock_context):
+        """Empty string fails the {1,64} length requirement."""
+        _, client = mock_context
+        result = await tools["get_my_tickets"](state="")
+        assert result.get("error") == "Invalid state filter format"
+        client.execute_kw.assert_not_called()
+
+    async def test_state_none_skips_filter(self, tools, mock_context):
+        """When state is None, no validation runs and no stage filter applies."""
+        _, client = mock_context
+        client.execute_kw.return_value = []
+        result = await tools["get_my_tickets"]()
+        assert "error" not in result
+        call_args = client.execute_kw.call_args
+        domain = call_args[0][2][0]
+        stage_entries = [
+            d for d in domain if isinstance(d, list) and d[0] == "stage_id.name"
+        ]
+        assert stage_entries == []
+
+    async def test_valid_state_simple_word_accepted(self, tools, mock_context):
+        """Plain stage names like 'New' pass validation and reach Odoo."""
+        _, client = mock_context
+        client.execute_kw.return_value = []
+        result = await tools["get_my_tickets"](state="New")
+        assert "error" not in result
+        call_args = client.execute_kw.call_args
+        domain = call_args[0][2][0]
+        assert ["stage_id.name", "=", "New"] in domain
+
+    async def test_valid_state_with_space_and_hyphen_accepted(
+        self, tools, mock_context
+    ):
+        """Multi-word stage names with hyphens are accepted."""
+        _, client = mock_context
+        client.execute_kw.return_value = []
+        result = await tools["get_my_tickets"](state="In Progress")
+        assert "error" not in result
+        result = await tools["get_my_tickets"](state="Pending-Review")
+        assert "error" not in result
+
+    async def test_invalid_state_with_unicode_quote_rejected(
+        self, tools, mock_context
+    ):
+        """Smart quotes and other non-allowed chars are rejected."""
+        _, client = mock_context
+        result = await tools["get_my_tickets"](state="New’")
+        assert result.get("error") == "Invalid state filter format"
+        client.execute_kw.assert_not_called()
+
+
+# ── create_ticket user_id sanitization tests ─────────────────────
+
+
+class TestCreateTicketUserIdSanitization:
+    """Verify create_ticket refuses to silently drop the user_id assignment."""
+
+    async def test_user_id_drop_returns_error(self, tools, mock_context):
+        """If RBAC strips user_id from the write values, fail loudly."""
+        ctx, client = mock_context
+        # Simulate an RBAC policy that removes user_id from helpdesk.ticket
+        # writes for this user.
+        def _strip_user_id(values, model, user_groups, is_admin):
+            return {k: v for k, v in values.items() if k != "user_id"}
+
+        ctx.rbac.sanitize_write_values.side_effect = _strip_user_id
+
+        result = await tools["create_ticket"](name="Triage me")
+
+        assert "error" in result
+        assert "user_id" in result["error"]
+        assert "permission" in result["error"].lower()
+        # The ticket must NOT have been created
+        client.execute_kw.assert_not_called()
+
+    async def test_user_id_preserved_allows_creation(self, tools, mock_context):
+        """When RBAC keeps user_id intact, creation proceeds normally."""
+        ctx, client = mock_context
+        # Identity sanitizer: returns values unchanged.
+        ctx.rbac.sanitize_write_values.side_effect = (
+            lambda values, model, user_groups, is_admin: dict(values)
+        )
+        client.execute_kw.return_value = 99
+
+        result = await tools["create_ticket"](name="OK")
+
+        assert result.get("status") == "created"
+        assert result.get("ticket_id") == 99
+        call_args = client.execute_kw.call_args
+        values = call_args[0][2][0]
+        assert values["user_id"] == 42
+
+
 # ── update_ticket_stage tests ────────────────────────────────────
 
 

@@ -152,3 +152,53 @@ class TestReadGroup:
 
         assert "error" in resp
         assert "Access denied" in resp["error"]
+
+    async def test_default_limit_caps_at_500(self) -> None:
+        """When limit is None, default cap of 500 is applied."""
+        mock_client = make_mock_client(execute_kw_return=[])
+        gateway = make_gateway(mock_client=mock_client)
+        fn = _get_tool(gateway)
+        await fn(
+            model="account.move.line",
+            fields=["balance:sum"],
+            groupby=["partner_id"],
+        )
+        call_kwargs = mock_client.execute_kw.call_args[0][3]
+        assert call_kwargs.get("limit") == 500
+
+    async def test_explicit_limit_clamped(self) -> None:
+        """Explicit limit > 500 is clamped to 500."""
+        mock_client = make_mock_client(execute_kw_return=[])
+        gateway = make_gateway(mock_client=mock_client)
+        fn = _get_tool(gateway)
+        await fn(
+            model="sale.order",
+            fields=["state"],
+            groupby=["state"],
+            limit=10000,
+        )
+        call_kwargs = mock_client.execute_kw.call_args[0][3]
+        assert call_kwargs["limit"] == 500
+
+    async def test_temporal_groupby(self) -> None:
+        """Temporal groupby syntax (e.g. create_date:month) passes validation."""
+        groups = [
+            {"create_date:month": "March 2025", "amount_total": 1500},
+        ]
+        mock_client = make_mock_client(execute_kw_return=groups)
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            fields=["amount_total:sum"],
+            groupby=["create_date:month"],
+        )
+
+        assert "error" not in resp
+        assert "groups" in resp
+        # Verify the groupby was forwarded to the mock client correctly
+        call_args = mock_client.execute_kw.call_args[0]
+        assert call_args[0] == "sale.order"
+        assert call_args[1] == "read_group"
+        assert call_args[2][2] == ["create_date:month"]

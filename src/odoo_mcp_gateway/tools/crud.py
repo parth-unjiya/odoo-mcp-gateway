@@ -56,6 +56,9 @@ def _validate_method(method: str) -> str:
 
 
 _AGG_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]*(?::[a-z]+)?$")
+_GROUPBY_FIELD_RE = re.compile(
+    r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*(?::(day|week|month|quarter|year))?$"
+)
 
 
 def _validate_fields(fields: list[str]) -> list[str]:
@@ -74,6 +77,21 @@ def _validate_agg_fields(fields: list[str]) -> list[str]:
         return fields
     for f in fields:
         if not _AGG_FIELD_RE.match(f):
+            raise ValueError(f"Invalid field name: {f!r}")
+    return fields
+
+
+def _validate_groupby_fields(fields: list[str]) -> list[str]:
+    """Validate groupby field names with optional temporal operators.
+
+    Accepts plain fields (``state``), dotted fields (``partner_id.name``),
+    and Odoo temporal grouping syntax (``create_date:month``).
+    Valid temporal operators: day, week, month, quarter, year.
+    """
+    if not fields:
+        return fields
+    for f in fields:
+        if not _GROUPBY_FIELD_RE.match(f):
             raise ValueError(f"Invalid field name: {f!r}")
     return fields
 
@@ -274,7 +292,8 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                     )
                 except Exception:
                     logger.debug("Field inspection failed for %s", model)
-                    fields = None  # Let Odoo use default fields
+                    # Fail safe: use a minimal field set rather than letting Odoo decide
+                    fields = ["id", "display_name"]
 
             # Clamp limit and offset
             limit = max(1, min(limit, _MAX_LIMIT))
@@ -438,8 +457,15 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
     async def create_record(
         model: str,
         values: dict[str, Any],
+        dry_run: bool = False,
     ) -> dict[str, Any]:
-        """Create a new record in an Odoo model."""
+        """Create a new record in an Odoo model.
+
+        Args:
+            model: Target Odoo model name
+            values: Field values for the new record
+            dry_run: If True, validate without creating. Returns what would be sent.
+        """
         try:
             model = _validate_model(model)
             client = _get_client(gateway)
@@ -488,6 +514,15 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 is_admin,
             )
 
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "model": model,
+                    "action": "create",
+                    "validated_values": values,
+                    "field_count": len(values),
+                }
+
             record_id = await client.execute_kw(
                 model,
                 "create",
@@ -507,8 +542,16 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
         model: str,
         record_id: int,
         values: dict[str, Any],
+        dry_run: bool = False,
     ) -> dict[str, Any]:
-        """Update an existing record in an Odoo model."""
+        """Update an existing record in an Odoo model.
+
+        Args:
+            model: Target Odoo model name
+            record_id: ID of the record to update
+            values: Field values to update
+            dry_run: If True, validate without updating. Returns what would be sent.
+        """
         try:
             model = _validate_model(model)
             if record_id <= 0:
@@ -559,6 +602,16 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 is_admin,
             )
 
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "model": model,
+                    "action": "update",
+                    "id": record_id,
+                    "validated_values": values,
+                    "field_count": len(values),
+                }
+
             await client.execute_kw(
                 model,
                 "write",
@@ -577,8 +630,15 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
     async def delete_record(
         model: str,
         record_id: int,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
-        """Delete a record from an Odoo model."""
+        """Delete a record from an Odoo model.
+
+        Args:
+            model: Target Odoo model name
+            record_id: ID of the record to delete
+            dry_run: If True, validate without deleting. Returns what would happen.
+        """
         try:
             model = _validate_model(model)
             if record_id <= 0:
@@ -603,6 +663,14 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             )
             if restriction_msg:
                 return {"error": restriction_msg}
+
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "model": model,
+                    "action": "delete",
+                    "id": record_id,
+                }
 
             await client.execute_kw(
                 model,
@@ -645,7 +713,7 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
 
             # Validate field and groupby names
             _validate_agg_fields(fields)
-            _validate_fields(groupby)
+            _validate_groupby_fields(groupby)
 
             # Check model restrictions
             restriction_msg = gateway.restrictions.check_model_access(
@@ -664,8 +732,7 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 orderby = _validate_order(orderby)
 
             kwargs: dict[str, Any] = {}
-            if limit is not None:
-                kwargs["limit"] = max(1, min(limit, 500))
+            kwargs["limit"] = max(1, min(limit if limit is not None else 500, 500))
             if orderby:
                 kwargs["orderby"] = orderby
 
@@ -700,14 +767,199 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             return {"error": gateway.sanitize_error(e)}
 
     @server.tool()
+    async def get_defaults(
+        model: str,
+        fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Get default values for fields on an Odoo model.
+
+        Returns default values that Odoo would pre-fill when
+        creating a new record. Useful for understanding what
+        values are auto-populated before calling create_record.
+        """
+        try:
+            model = _validate_model(model)
+            client = _get_client(gateway)
+            auth_mgr = _get_auth_manager(gateway)
+            auth_result = auth_mgr.auth_result
+            is_admin = auth_result.is_admin if auth_result else False
+            user_groups = auth_result.groups if auth_result else []
+
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
+            gate_error = await security_gate(gateway, "get_defaults", session_key)
+            if gate_error:
+                return {"error": gate_error}
+
+            # Check model restrictions
+            restriction_msg = gateway.restrictions.check_model_access(
+                model,
+                "read",
+                is_admin,
+            )
+            if restriction_msg:
+                return {"error": restriction_msg}
+
+            # Validate fields if provided
+            if fields:
+                _validate_fields(fields)
+            else:
+                # Get all writable field names from field inspector
+                try:
+                    all_fields = await gateway.field_inspector.get_fields(
+                        client,
+                        model,
+                    )
+                    fields = [
+                        fname
+                        for fname, finfo in all_fields.items()
+                        if not finfo.readonly
+                    ]
+                except Exception:
+                    logger.debug("Field inspection failed for %s", model)
+                    fields = []
+
+            result = await client.execute_kw(
+                model,
+                "default_get",
+                [fields],
+            )
+
+            # Apply RBAC field filtering
+            if isinstance(result, dict):
+                filtered = gateway.rbac.filter_response_fields(
+                    [result],
+                    model,
+                    user_groups,
+                    is_admin,
+                )
+                result = filtered[0]
+
+            return {"defaults": result, "model": model}
+
+        except ValueError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            logger.exception("Unexpected error in get_defaults")
+            return {"error": gateway.sanitize_error(e)}
+
+    @server.tool()
+    async def get_onchange(
+        model: str,
+        values: dict[str, Any],
+        changed_field: str,
+        fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Simulate an onchange event on an Odoo model.
+
+        Returns the values that would change when a field is
+        modified in the UI. Useful for previewing side effects
+        before calling create_record or update_record.
+
+        Args:
+            model: The Odoo model name
+            values: Current field values (partial record)
+            changed_field: The field that was just changed
+            fields: Fields to check for onchange effects.
+                Defaults to keys of values.
+        """
+        try:
+            model = _validate_model(model)
+
+            # Validate changed_field
+            if not _WRITE_FIELD_RE.match(changed_field):
+                return {"error": f"Invalid field name: {changed_field!r}"}
+
+            # Validate values keys and size/depth
+            _validate_write_values(values)
+            for field_name in values:
+                if not _WRITE_FIELD_RE.match(field_name):
+                    return {"error": f"Invalid field name: {field_name!r}"}
+
+            # Validate fields parameter — must be plain field names
+            if fields:
+                for f in fields:
+                    if not _WRITE_FIELD_RE.match(f):
+                        return {"error": f"Invalid field name in fields: {f!r}"}
+
+            client = _get_client(gateway)
+            auth_mgr = _get_auth_manager(gateway)
+            auth_result = auth_mgr.auth_result
+            is_admin = auth_result.is_admin if auth_result else False
+            user_groups = auth_result.groups if auth_result else []
+
+            session_key = get_current_session_key() or next(
+                iter(gateway.auth_managers.keys()), "default"
+            )
+            gate_error = await security_gate(gateway, "get_onchange", session_key)
+            if gate_error:
+                return {"error": gate_error}
+
+            # Check model restrictions
+            restriction_msg = gateway.restrictions.check_model_access(
+                model,
+                "read",
+                is_admin,
+            )
+            if restriction_msg:
+                return {"error": restriction_msg}
+
+            # Build the onchange spec
+            field_onchange = {f: "" for f in (fields or list(values.keys()))}
+            # Make sure changed_field is in the spec
+            if changed_field not in field_onchange:
+                field_onchange[changed_field] = ""
+
+            result = await client.execute_kw(
+                model,
+                "onchange",
+                [[], values, [changed_field], field_onchange],
+            )
+
+            changes = result.get("value", {}) if isinstance(result, dict) else {}
+
+            # Apply RBAC field filtering on onchange results
+            if isinstance(changes, dict) and changes:
+                filtered = gateway.rbac.filter_response_fields(
+                    [changes],
+                    model,
+                    user_groups,
+                    is_admin,
+                )
+                changes = filtered[0]
+
+            return {
+                "changes": changes,
+                "warnings": result.get("warning") if isinstance(result, dict) else None,
+                "model": model,
+            }
+
+        except ValueError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            logger.exception("Unexpected error in get_onchange")
+            return {"error": gateway.sanitize_error(e)}
+
+    @server.tool()
     async def execute_method(
         model: str,
         method: str,
         record_ids: list[int] | None = None,
         args: list[Any] | None = None,
         kwargs: dict[str, Any] | None = None,
+        dry_run: bool = False,
     ) -> dict[str, Any]:
-        """Execute a method on an Odoo model."""
+        """Execute a method on an Odoo model.
+
+        Args:
+            model: Target Odoo model name
+            method: Method name to execute
+            record_ids: Optional list of record IDs to operate on
+            args: Additional positional arguments for the method
+            kwargs: Additional keyword arguments for the method
+            dry_run: If True, validate without executing. Returns what would be called.
+        """
         try:
             model = _validate_model(model)
             method = _validate_method(method)
@@ -784,6 +1036,15 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if args:
                 call_args.extend(args)
 
+            if dry_run:
+                return {
+                    "dry_run": True,
+                    "model": model,
+                    "method": method,
+                    "record_ids": record_ids,
+                    "args_count": len(call_args),
+                }
+
             result = await client.execute_kw(
                 model,
                 method,
@@ -798,3 +1059,19 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
         except Exception as e:
             logger.exception("Unexpected error in execute_method")
             return {"error": gateway.sanitize_error(e)}
+
+    # Register operation types for security middleware
+    from odoo_mcp_gateway.core.security import register_tool_operations
+
+    register_tool_operations({
+        "search_read": "read",
+        "get_record": "read",
+        "search_count": "read",
+        "create_record": "create",
+        "update_record": "write",
+        "delete_record": "delete",
+        "read_group": "read",
+        "get_defaults": "read",
+        "get_onchange": "read",
+        "execute_method": "write",
+    })

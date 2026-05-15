@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.plugins.base import OdooPlugin
 from odoo_mcp_gateway.plugins.core.helpers import (
+    check_plugin_modules,
     check_security_gate,
     format_model_error,
     get_auth_info,
@@ -49,6 +50,8 @@ class ProjectPlugin(OdooPlugin):
 
     def register(self, server: FastMCP, context: Any) -> None:
         """Register project tools on the MCP server."""
+        _plugin_name = self.name
+        _required_models = self.required_models
 
         @server.tool()
         async def get_my_tasks(
@@ -66,6 +69,10 @@ class ProjectPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             gate_error = await check_security_gate(context, "get_my_tasks")
             if gate_error:
@@ -135,6 +142,10 @@ class ProjectPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             if project_id <= 0:
                 return {"error": "project_id must be a positive integer"}
@@ -254,6 +265,10 @@ class ProjectPlugin(OdooPlugin):
             client = get_client(context)
             if client is None:
                 return {"error": "Not authenticated"}
+
+            module_error = check_plugin_modules(context, _plugin_name, _required_models)
+            if module_error:
+                return {"error": module_error}
 
             if task_id <= 0:
                 return {"error": "task_id must be a positive integer"}
