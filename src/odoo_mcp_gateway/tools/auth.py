@@ -149,6 +149,10 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
                     if old_key == session_key:
                         continue
                     prior_mgr = gateway.auth_managers.pop(old_key)
+                    # Revoke the prior session's bearer tokens FIRST so
+                    # an in-flight HTTP request can't validate against
+                    # a dead AuthManager.
+                    gateway.revoke_session_tokens(old_key)
                     try:
                         await prior_mgr.close()
                     except Exception:
@@ -171,6 +175,15 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 gateway.auth_managers[session_key] = auth_mgr
                 auth_mgr.register_session(session_key)
                 set_current_session_key(session_key)
+                # Mint a fresh bearer token for HTTP-transport callers.
+                # Stdio callers ignore this — they have no need for a
+                # bearer header — but issuing universally keeps the
+                # response shape consistent and lets a process started
+                # as stdio be re-attached over HTTP later (rare, but
+                # cheap to support). ``issue_bearer_token`` revokes any
+                # prior token for this session_key, so re-login rotates
+                # the credential automatically.
+                bearer_token = gateway.issue_bearer_token(session_key)
 
             # Detect Odoo version after successful authentication
             version_info = None
@@ -226,6 +239,17 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if version_info is not None:
                 response["version"] = version_info.full_string
                 response["edition"] = version_info.edition
+            # Surface the bearer token to HTTP-transport callers. The
+            # field is named ``bearer_token`` rather than ``token`` to
+            # avoid colliding with future OAuth ``access_token`` /
+            # ``refresh_token`` fields and to make the wire shape
+            # explicit ("send this in the Authorization header").
+            #
+            # Callers using stdio can ignore it; it's harmless metadata
+            # for them and useful documentation of the auth surface.
+            response["bearer_token"] = bearer_token
+            # OAuth 2.0 "token_type" naming convention — not a secret.
+            response["token_type"] = "Bearer"  # noqa: S105 - protocol literal
             return response
 
         except OdooAuthError as e:

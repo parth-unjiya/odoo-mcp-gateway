@@ -55,7 +55,15 @@ class TestMainStreamableHTTP:
     @patch("odoo_mcp_gateway.__main__.create_server")
     @patch("odoo_mcp_gateway.__main__.Settings")
     def test_main_streamable_http_transport(self, mock_settings, mock_create_server):
-        """main() with streamable-http transport uses that transport."""
+        """main() with streamable-http transport invokes our custom runner.
+
+        v0.3.0 changed the streamable-http path: instead of calling
+        ``server.run(transport="streamable-http")`` (which would bypass
+        our SessionResolverMiddleware), main() now invokes our
+        ``_run_streamable_http`` via ``anyio.run`` so the middleware
+        gets injected before uvicorn starts. We mock ``anyio.run`` here
+        to keep the test fast and free of network state.
+        """
         settings = MagicMock()
         settings.mcp_transport = "streamable-http"
         settings.mcp_log_level = "INFO"
@@ -64,12 +72,21 @@ class TestMainStreamableHTTP:
         mock_server = MagicMock()
         mock_create_server.return_value = mock_server
 
-        from odoo_mcp_gateway.__main__ import main
+        with patch("odoo_mcp_gateway.__main__.anyio") as mock_anyio:
+            from odoo_mcp_gateway.__main__ import (
+                _run_streamable_http,
+                main,
+            )
 
-        main()
+            main()
 
         mock_create_server.assert_called_once_with(settings)
-        mock_server.run.assert_called_once_with(transport="streamable-http")
+        # FastMCP's run() must NOT be called — we drive uvicorn directly.
+        mock_server.run.assert_not_called()
+        # anyio.run was called with our custom runner + server + settings.
+        mock_anyio.run.assert_called_once_with(
+            _run_streamable_http, mock_server, settings
+        )
 
 
 # ── Logging setup ────────────────────────────────────────────────
@@ -188,13 +205,19 @@ class TestLoggerMessages:
         log_args = mock_logger.info.call_args
         assert "transport" in log_args[0][0].lower() or ("transport" in str(log_args))
 
+    @patch("odoo_mcp_gateway.__main__.anyio")
     @patch("odoo_mcp_gateway.__main__.create_server")
     @patch("odoo_mcp_gateway.__main__.Settings")
     @patch("odoo_mcp_gateway.__main__.logger")
     def test_startup_message_includes_transport_value(
-        self, mock_logger, mock_settings, mock_create_server
+        self, mock_logger, mock_settings, mock_create_server, mock_anyio
     ):
-        """main() passes the actual transport value to the logger."""
+        """main() passes the actual transport value to the logger.
+
+        We mock ``anyio`` because v0.3.0's streamable-http path drives
+        uvicorn directly via ``anyio.run(_run_streamable_http, ...)``,
+        which would block indefinitely in a unit test.
+        """
         settings = MagicMock()
         settings.mcp_transport = "streamable-http"
         settings.mcp_log_level = "INFO"

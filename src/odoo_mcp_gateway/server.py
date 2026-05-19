@@ -65,6 +65,18 @@ class GatewayContext:
         # The lock is created lazily on first use because GatewayContext
         # is sometimes constructed outside an event loop (tests).
         self._auth_lock: asyncio.Lock | None = None
+        # Opaque-bearer-token → session_key registry. Populated by the
+        # ``login`` tool on successful authentication; consulted by
+        # ``OdooTokenVerifier`` on every HTTP request. Tokens are
+        # 256-bit URL-safe strings (``secrets.token_urlsafe(32)``);
+        # rotation happens on re-login (old token revoked, new one
+        # issued) so a leaked token's blast radius is bounded by the
+        # session lifetime, not forever.
+        #
+        # Empty in stdio mode — tokens are only issued when the gateway
+        # is reachable over HTTP, since the stdio caller is the only
+        # client and doesn't need a bearer.
+        self.token_index: dict[str, str] = {}
         self.restrictions = RestrictionChecker(
             config=gateway_config.restrictions,
             model_access=gateway_config.model_access,
@@ -110,6 +122,11 @@ class GatewayContext:
             except Exception:
                 logger.debug("Error closing auth manager %s", key, exc_info=True)
         self.auth_managers.clear()
+        # Clear bearer tokens together with their owning sessions. The
+        # tokens are useless without the AuthManager anyway, but
+        # leaving them in the index would leak the (token, session_key)
+        # mapping to a future debug log or memory dump.
+        self.token_index.clear()
 
     def auth_lock(self) -> asyncio.Lock:
         """Return the lazily-created lock that serializes auth mutations.
@@ -123,6 +140,55 @@ class GatewayContext:
         if self._auth_lock is None:
             self._auth_lock = asyncio.Lock()
         return self._auth_lock
+
+    def issue_bearer_token(self, session_key: str) -> str:
+        """Mint a fresh opaque bearer token bound to *session_key*.
+
+        Idempotency: if a previous token exists for *session_key* it is
+        revoked first. Callers that re-login as the same user therefore
+        always get a brand-new token, and the old token immediately
+        stops working — bounding leak blast radius to the time between
+        leak and next login.
+
+        Caller is responsible for holding ``self.auth_lock()`` if the
+        token issuance is paired with an ``auth_managers`` mutation
+        (which it always is in the login flow).
+        """
+        # Revoke any prior token for this session.
+        self.revoke_session_tokens(session_key)
+        import secrets
+
+        token = secrets.token_urlsafe(32)
+        # 256-bit collision space — birthday probability is irrelevant
+        # within a single process lifetime, but assert defensively
+        # against the catastrophic case.
+        if token in self.token_index:  # pragma: no cover - astronomically unlikely
+            token = secrets.token_urlsafe(32)
+        self.token_index[token] = session_key
+        return token
+
+    def revoke_token(self, token: str) -> bool:
+        """Remove a single token from the index. Returns True if removed."""
+        return self.token_index.pop(token, None) is not None
+
+    def revoke_session_tokens(self, session_key: str) -> int:
+        """Revoke every token bound to *session_key*. Returns count revoked.
+
+        Used when the session itself is being closed (eviction, logout,
+        expiry) so dangling tokens don't outlive their AuthManager.
+        """
+        stale = [t for t, sk in self.token_index.items() if sk == session_key]
+        for t in stale:
+            del self.token_index[t]
+        return len(stale)
+
+    def resolve_token(self, token: str) -> str | None:
+        """Look up *token* and return its bound session_key, or None.
+
+        Returns None for unknown tokens AND for tokens whose session
+        has been evicted (the index is kept consistent by callers).
+        """
+        return self.token_index.get(token)
 
     def sanitize_error(self, exc: Exception) -> str:
         """Sanitize an exception message for client consumption."""
@@ -264,16 +330,55 @@ def _sync_cleanup(gateway: GatewayContext) -> None:
         )
 
 
-def create_server(settings: Settings) -> FastMCP:
-    """Create and configure the MCP server with all tools registered."""
-    server = FastMCP(
+def _build_fastmcp(settings: Settings, gateway: GatewayContext) -> FastMCP:
+    """Construct the FastMCP instance, wiring auth when HTTP transport is used.
+
+    Stdio mode runs with NO bearer-token enforcement — env-var credentials
+    + the in-tool ``login`` exchange are the auth surface there. HTTP mode
+    requires bearer auth on every request; we wire the MCP SDK's
+    ``BearerAuthBackend`` + ``AuthContextMiddleware`` pair and supply our
+    ``OdooTokenVerifier`` so the SDK consults our token index.
+
+    AuthSettings has two required URLs — ``issuer_url`` and
+    ``resource_server_url`` — even though we're not running a full
+    OAuth issuer in Sprint 1. We point both at our own gateway URL so
+    the SDK's PRM advertisement is internally consistent. ADR-005 will
+    replace the issuer with a real IdP URL when OAuth lands.
+    """
+    if settings.mcp_transport != "streamable-http":
+        return FastMCP(
+            name="odoo-mcp-gateway",
+            host=settings.mcp_host,
+            port=settings.mcp_port,
+        )
+
+    # HTTP transport: bearer auth required.
+    from mcp.server.auth.settings import AuthSettings
+
+    from odoo_mcp_gateway.core.auth.token_verifier import OdooTokenVerifier
+
+    # Self-referential issuer URL for Sprint 1 (opaque-token mode).
+    # When OAuth lands in ADR-005, the issuer becomes the IdP's URL.
+    gateway_url = f"http://{settings.mcp_host}:{settings.mcp_port}/"
+    auth_settings = AuthSettings(
+        issuer_url=gateway_url,  # type: ignore[arg-type]
+        resource_server_url=gateway_url,  # type: ignore[arg-type]
+        required_scopes=["odoo.session"],
+    )
+    return FastMCP(
         name="odoo-mcp-gateway",
         host=settings.mcp_host,
         port=settings.mcp_port,
+        auth=auth_settings,
+        token_verifier=OdooTokenVerifier(gateway),
     )
 
+
+def create_server(settings: Settings) -> FastMCP:
+    """Create and configure the MCP server with all tools registered."""
     gateway_config = load_config(settings.config_dir)
     gateway = GatewayContext(settings, gateway_config)
+    server = _build_fastmcp(settings, gateway)
 
     # Register atexit handler so auth manager connections are cleaned up
     # when the server process exits.
