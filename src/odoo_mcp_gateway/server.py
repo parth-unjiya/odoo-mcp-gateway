@@ -28,6 +28,7 @@ from odoo_mcp_gateway.core.security.rate_limit import (
 from odoo_mcp_gateway.core.security.rbac import RBACManager
 from odoo_mcp_gateway.core.security.restrictions import RestrictionChecker
 from odoo_mcp_gateway.core.security.sanitizer import ErrorSanitizer
+from odoo_mcp_gateway.core.version.adapters import VersionAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,15 @@ class GatewayContext:
         self.settings = settings
         self.gateway_config = gateway_config
         self.auth_managers: dict[str, AuthManager] = {}
+        # Lock that serializes mutations of ``auth_managers`` and any
+        # session-eviction logic that runs alongside a login. Without
+        # this, two concurrent login() calls (or a login() racing with
+        # an in-flight tool call) can interleave the "pop prior session
+        # + register new session" steps and leave the dict in a state
+        # where the calling user resolves to someone else's session.
+        # The lock is created lazily on first use because GatewayContext
+        # is sometimes constructed outside an event loop (tests).
+        self._auth_lock: asyncio.Lock | None = None
         self.restrictions = RestrictionChecker(
             config=gateway_config.restrictions,
             model_access=gateway_config.model_access,
@@ -88,6 +98,9 @@ class GatewayContext:
             cache_ttl=settings.cache_ttl_seconds,
         )
         self._models_discovered = False
+        # Version-specific adapter (set during login after version detection).
+        # Drives field-rename translation, context normalization, etc.
+        self.version_adapter: VersionAdapter | None = None
 
     async def cleanup(self) -> None:
         """Close all auth managers and their underlying connections."""
@@ -97,6 +110,19 @@ class GatewayContext:
             except Exception:
                 logger.debug("Error closing auth manager %s", key, exc_info=True)
         self.auth_managers.clear()
+
+    def auth_lock(self) -> asyncio.Lock:
+        """Return the lazily-created lock that serializes auth mutations.
+
+        The lock must be acquired around every operation that mutates
+        ``self.auth_managers`` together with its session-eviction side
+        effects (e.g. popping prior sessions during single-user-per-
+        process enforcement) so concurrent callers cannot observe the
+        dict mid-swap.
+        """
+        if self._auth_lock is None:
+            self._auth_lock = asyncio.Lock()
+        return self._auth_lock
 
     def sanitize_error(self, exc: Exception) -> str:
         """Sanitize an exception message for client consumption."""
@@ -133,36 +159,82 @@ def get_current_session_key() -> str | None:
     return _current_session_key.get(None)
 
 
-def _get_client(gateway: GatewayContext) -> Any:
-    """Get the active authenticated Odoo client.
+def _resolve_session_auth_manager(gateway: GatewayContext) -> AuthManager:
+    """Return the AuthManager for the current request session.
 
-    In HTTP mode, uses the ``_current_session_key`` context variable
-    to locate the correct session. Falls back to picking the first
-    available session (single-user stdio mode).
+    Resolution mirrors ``plugins.core.helpers._resolve_auth_manager``:
+
+    * If the ``_current_session_key`` ContextVar is SET, the call is
+      bound strictly to that key. If the key has gone stale (session
+      was popped by re-login or eviction) we raise rather than degrade
+      to whichever single manager happens to remain — that residual
+      manager almost certainly belongs to a different user, and the
+      contextvar being set is the caller's contract that they want
+      THAT session.
+    * If the ContextVar is NOT set AND exactly ONE session exists,
+      use it (stdio mode with single-user-per-process enforcement).
+    * Otherwise raise.
+
+    Shared helper for the two thin wrappers below — keeps the
+    resolution logic in one place so future changes only have to land
+    here.
     """
     if not gateway.auth_managers:
         raise ValueError("Not authenticated. Please call the login tool first.")
     session_key = _current_session_key.get(None)
-    if session_key is not None and session_key in gateway.auth_managers:
-        return gateway.auth_managers[session_key].get_active_client()
-    # Fallback for stdio (single session) or when session key is not set
-    auth_mgr = next(iter(gateway.auth_managers.values()))
-    return auth_mgr.get_active_client()
+    if session_key is not None:
+        mgr = gateway.auth_managers.get(session_key)
+        if mgr is None:
+            # Contextvar set but stale — refuse rather than fall through
+            # to a residual session that belongs to someone else.
+            raise ValueError(
+                "Session is no longer active. Please call the login "
+                "tool again to re-authenticate."
+            )
+        return mgr
+    # No contextvar — only safe to resolve in the single-session case.
+    if len(gateway.auth_managers) == 1:
+        return next(iter(gateway.auth_managers.values()))
+    raise ValueError(
+        "Multiple sessions exist but no request session is bound — "
+        "cannot resolve unambiguously. This indicates HTTP multi-tenant "
+        "use without per-request session middleware (not yet supported)."
+    )
+
+
+def _get_client(gateway: GatewayContext) -> Any:
+    """Get the active authenticated Odoo client for the current session."""
+    return _resolve_session_auth_manager(gateway).get_active_client()
 
 
 def _get_auth_manager(gateway: GatewayContext) -> AuthManager:
-    """Get the active AuthManager.
+    """Get the active AuthManager for the current session."""
+    return _resolve_session_auth_manager(gateway)
 
-    In HTTP mode, uses the ``_current_session_key`` context variable
-    to locate the correct session. Falls back to picking the first
-    available session (single-user stdio mode).
+
+def get_auth_context(gateway: GatewayContext) -> tuple[Any, int, bool, list[str]]:
+    """Atomic capture of (client, uid, is_admin, groups) for the current request.
+
+    Resolves the AuthManager ONCE and reads everything from it — preventing
+    a TOCTOU window where ``_get_client`` and ``_get_auth_manager`` could
+    each independently re-resolve and land on different sessions. CRUD
+    tools should prefer this over the two-call pattern.
+
+    Raises ``ValueError`` (same surface as ``_get_client``) when no
+    unambiguous session can be resolved, so callers can handle the
+    "not authenticated" case in one ``except`` clause.
     """
-    if not gateway.auth_managers:
-        raise ValueError("Not authenticated. Please call the login tool first.")
-    session_key = _current_session_key.get(None)
-    if session_key is not None and session_key in gateway.auth_managers:
-        return gateway.auth_managers[session_key]
-    return next(iter(gateway.auth_managers.values()))
+    mgr = _resolve_session_auth_manager(gateway)
+    client = mgr.get_active_client()
+    auth_result = mgr.auth_result
+    if auth_result is None:
+        raise ValueError("Session has no auth result. Please call login again.")
+    return (
+        client,
+        auth_result.uid,
+        auth_result.is_admin,
+        list(auth_result.groups),
+    )
 
 
 def _sync_cleanup(gateway: GatewayContext) -> None:

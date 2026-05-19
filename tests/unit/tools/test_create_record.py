@@ -184,7 +184,14 @@ class TestCreateRecord:
         fn = _get_tool(gateway)
         await fn(model="res.partner", values={"name": "X"})
 
-        mock_client.execute_kw.assert_called_once()
-        call_args = mock_client.execute_kw.call_args[0]
+        # The create_record tool now does a pre-flight ``fields_get`` to
+        # reject writes to readonly/computed fields. So we look for the
+        # ``create`` call in the recorded calls rather than asserting a
+        # single call total.
+        create_calls = [
+            c for c in mock_client.execute_kw.call_args_list if c.args[1] == "create"
+        ]
+        assert len(create_calls) == 1
+        call_args = create_calls[0].args
         assert call_args[0] == "res.partner"
         assert call_args[1] == "create"

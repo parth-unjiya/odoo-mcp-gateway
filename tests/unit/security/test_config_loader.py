@@ -211,3 +211,42 @@ class TestEnvInterpolation:
         config = load_config(str(tmp_path))
         assert "ir.cron" in config.restrictions.always_blocked
         assert "res.users" in config.restrictions.admin_only
+
+
+class TestConfigDirFallback:
+    """v0.2.2 S3: load_config falls back to CWD when configured dir is missing."""
+
+    def test_fallback_to_cwd_when_configured_dir_empty(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from odoo_mcp_gateway.core.security.config_loader import load_config
+
+        # Create a CWD with a real restrictions.yaml
+        cwd_dir = tmp_path / "cwd"
+        cwd_dir.mkdir()
+        (cwd_dir / "restrictions.yaml").write_text(
+            "always_blocked:\n  - x.test_model\n"
+        )
+        monkeypatch.chdir(cwd_dir)
+
+        # Configured dir doesn't exist
+        config = load_config("/nonexistent/path")
+
+        # Should have loaded from CWD
+        assert "x.test_model" in config.restrictions.always_blocked
+
+    def test_default_returns_empty_config_when_nothing_found(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No YAML anywhere → defaults to deny."""
+        from odoo_mcp_gateway.core.security.config_loader import load_config
+
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        monkeypatch.chdir(empty_dir)
+
+        config = load_config("/also/nonexistent")
+
+        # Empty config → default_policy is "deny"
+        assert config.model_access.default_policy == "deny"
+        assert config.restrictions.always_blocked == []

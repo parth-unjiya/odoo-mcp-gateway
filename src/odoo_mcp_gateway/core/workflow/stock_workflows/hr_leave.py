@@ -38,6 +38,11 @@ def get_workflow() -> WorkflowDef:
                 name="confirm",
                 label="To Approve",
                 transitions=(
+                    # action_approve is the canonical path on every
+                    # supported version. action_validate is the legacy
+                    # alias that ONLY works from 'confirm' on Odoo 17;
+                    # marking it max_version=17 keeps callers from being
+                    # advertised a method that will raise on Odoo 18+.
                     TransitionDef(
                         action="action_approve",
                         target_state="validate",
@@ -47,6 +52,17 @@ def get_workflow() -> WorkflowDef:
                             "type requires double validation, this moves "
                             "to 'Second Approval' instead."
                         ),
+                    ),
+                    TransitionDef(
+                        action="action_validate",
+                        target_state="validate",
+                        label="Validate (v17)",
+                        description=(
+                            "Odoo 17 legacy path. Use action_approve on "
+                            "Odoo 18+ — calling action_validate from "
+                            "'confirm' is not supported there."
+                        ),
+                        max_version=17,
                     ),
                     TransitionDef(
                         action="action_refuse",
@@ -66,13 +82,17 @@ def get_workflow() -> WorkflowDef:
                 name="validate1",
                 label="Second Approval",
                 transitions=(
+                    # 'action_validate' from validate1 is correct on both
+                    # Odoo 17 and 18 — it is the documented second-step
+                    # approval call for double-validation leave types.
                     TransitionDef(
                         action="action_validate",
                         target_state="validate",
                         label="Validate",
                         description=(
                             "Final approval for leave types that "
-                            "require double validation."
+                            "require double validation. Works on both "
+                            "Odoo 17 and Odoo 18+."
                         ),
                     ),
                     TransitionDef(
@@ -149,5 +169,15 @@ def get_workflow() -> WorkflowDef:
                 "submit for approval."
             ),
         ),
-        version_notes={},
+        version_notes={
+            "v17": (
+                "From 'confirm', both action_approve and action_validate "
+                "are accepted. From 'validate1', use action_validate."
+            ),
+            "v18": (
+                "From 'confirm', use action_approve (action_validate "
+                "from this state is no longer supported). From "
+                "'validate1', action_validate is still correct."
+            ),
+        },
     )

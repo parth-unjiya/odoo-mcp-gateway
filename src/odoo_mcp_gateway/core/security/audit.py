@@ -61,7 +61,7 @@ class AuditLogger:
 
     def __init__(
         self,
-        backend: str = "file",
+        backend: str = "logger",
         log_path: str = "audit.log",
     ) -> None:
         self._backend = backend

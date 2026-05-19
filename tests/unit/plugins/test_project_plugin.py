@@ -364,3 +364,100 @@ class TestIDORProtection:
             d for d in domain if isinstance(d, list) and d[0] == "user_ids"
         ]
         assert len(user_ids_entries) == 0
+
+    async def test_nonadmin_get_project_summary_scopes_project_and_tasks(
+        self, nonadmin_project_tools, nonadmin_project_context
+    ):
+        """Non-admin get_project_summary scopes BOTH project + task queries.
+
+        The project query must include visibility scoping (manager OR
+        employees-visible) and the task query must include the user_ids
+        filter so the caller only sees stats for tasks they're assigned to.
+        """
+        _, client = nonadmin_project_context
+        client.execute_kw.side_effect = [
+            # Project visibility check passes — caller is the manager.
+            [
+                {
+                    "id": 1,
+                    "name": "Internal Tooling",
+                    "user_id": [42, "Bob"],
+                    "partner_id": False,
+                    "date_start": "2026-01-01",
+                    "date": "2026-12-31",
+                },
+            ],
+            # Task stats for tasks assigned to the caller.
+            [
+                {
+                    "name": "Task A",
+                    "stage_id": [1, "To Do"],
+                    "state": "01_in_progress",
+                    "date_deadline": False,
+                    "user_ids": [42],
+                },
+            ],
+        ]
+        result = await nonadmin_project_tools["get_project_summary"](project_id=1)
+
+        assert result["project"]["name"] == "Internal Tooling"
+        assert result["total_tasks"] == 1
+
+        # Project query must scope visibility for non-admin callers.
+        project_call = client.execute_kw.call_args_list[0]
+        project_domain = project_call[0][2][0]
+        assert ["id", "=", 1] in project_domain
+        assert ["user_id", "=", 42] in project_domain
+        assert ["privacy_visibility", "=", "employees"] in project_domain
+
+        # Task query must include the user_ids scoping clause.
+        task_call = client.execute_kw.call_args_list[1]
+        task_domain = task_call[0][2][0]
+        assert ["project_id", "=", 1] in task_domain
+        assert ["user_ids", "in", [42]] in task_domain
+
+    async def test_admin_get_project_summary_does_not_scope(
+        self, admin_project_tools, admin_project_context
+    ):
+        """Admin get_project_summary must NOT scope project or task queries."""
+        _, client = admin_project_context
+        client.execute_kw.side_effect = [
+            [
+                {
+                    "id": 1,
+                    "name": "Customer Portal",
+                    "user_id": [99, "Alice"],
+                    "partner_id": False,
+                    "date_start": "2026-01-01",
+                    "date": "2026-12-31",
+                },
+            ],
+            [],  # no tasks
+        ]
+        await admin_project_tools["get_project_summary"](project_id=1)
+
+        # Project query: only the id constraint, no visibility scoping.
+        project_domain = client.execute_kw.call_args_list[0][0][2][0]
+        assert project_domain == [["id", "=", 1]]
+
+        # Task query: only the project_id constraint, no user_ids scoping.
+        task_domain = client.execute_kw.call_args_list[1][0][2][0]
+        assert ["project_id", "=", 1] in task_domain
+        user_ids_clauses = [
+            d for d in task_domain if isinstance(d, list) and d[0] == "user_ids"
+        ]
+        assert user_ids_clauses == []
+
+    async def test_nonadmin_get_project_summary_hidden_project_returns_not_found(
+        self, nonadmin_project_tools, nonadmin_project_context
+    ):
+        """Non-admin caller without project visibility gets a 'not found' error.
+
+        The scoped project query returns no rows, so the call surfaces
+        ``Project not found`` rather than leaking the project's existence.
+        """
+        _, client = nonadmin_project_context
+        # First call (scoped project lookup) returns empty -> hidden from caller.
+        client.execute_kw.side_effect = [[]]
+        result = await nonadmin_project_tools["get_project_summary"](project_id=1)
+        assert result["error"] == "Project not found"

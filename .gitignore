@@ -50,3 +50,10 @@ OPENCLAW_COMPARISON.md
 .claude-flow/
 .claude/
 .mcp.json
+.release-drafts/
+
+# ── Deployed YAML configs (site-specific, only .example tracked) ──
+config/restrictions.yaml
+config/model_access.yaml
+config/rbac.yaml
+config/gateway.yaml

@@ -10,6 +10,11 @@ class TransitionDef:
     """A valid state transition within a workflow.
 
     Represents a single action that moves a record from one state to another.
+    Version constraints (``min_version`` / ``max_version``) let a single
+    workflow definition advertise the correct method per Odoo major
+    version — e.g. ``action_done`` for Odoo 17 vs ``action_lock`` for
+    Odoo 18+ — without forcing the AI caller to know which version is
+    in use. See :func:`is_supported_on` for the matching helper.
     """
 
     action: str
@@ -23,6 +28,39 @@ class TransitionDef:
 
     description: str = ""
     """Optional help text explaining the transition."""
+
+    min_version: int | None = None
+    """Minimum Odoo major version where this transition is supported.
+
+    ``None`` means "no lower bound" (supported on every version). Use
+    ``18`` to mark a transition introduced in Odoo 18 (e.g.
+    ``action_lock`` replacing ``action_done``).
+    """
+
+    max_version: int | None = None
+    """Maximum Odoo major version where this transition is supported.
+
+    ``None`` means "no upper bound" (supported on every version). Use
+    ``17`` to mark a transition removed in Odoo 18+ (e.g. legacy
+    ``action_done`` on sale.order).
+    """
+
+    def is_supported_on(self, major_version: int | None) -> bool:
+        """Return True if this transition applies to the given major version.
+
+        When ``major_version`` is ``None`` (version not detected yet)
+        the transition is advertised — failing open here is the right
+        call because the caller has no version-specific advice to act
+        on yet, and the static blocklist still filters out impossible
+        method names elsewhere.
+        """
+        if major_version is None:
+            return True
+        if self.min_version is not None and major_version < self.min_version:
+            return False
+        if self.max_version is not None and major_version > self.max_version:
+            return False
+        return True
 
 
 @dataclass(frozen=True)

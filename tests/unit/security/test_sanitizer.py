@@ -323,3 +323,29 @@ class TestContainsInternals:
 
     def test_empty_text_passes(self, sanitizer: ErrorSanitizer) -> None:
         assert sanitizer._contains_internals("") is False
+
+
+class TestWerkzeug404Mapping:
+    """v0.2.2 S1: Werkzeug 404 boilerplate maps to friendly message."""
+
+    def test_404_message_replaced_with_friendly(self) -> None:
+        from odoo_mcp_gateway.core.security.sanitizer import ErrorSanitizer
+
+        sanitizer = ErrorSanitizer()
+        raw = (
+            "404 Not Found: The requested URL was not found on the server. "
+            "If you entered the URL manually please check your spelling and "
+            "try again."
+        )
+        result = sanitizer.sanitize(raw)
+
+        assert "404 Not Found" not in result
+        assert "The requested URL" not in result
+        assert "Model or endpoint not found" in result
+
+    def test_non_404_unaffected(self) -> None:
+        from odoo_mcp_gateway.core.security.sanitizer import ErrorSanitizer
+
+        sanitizer = ErrorSanitizer()
+        result = sanitizer.sanitize("Some other error message")
+        assert "Model or endpoint" not in result

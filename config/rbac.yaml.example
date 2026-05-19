@@ -6,6 +6,11 @@
 
 # Which Odoo groups are required to call specific MCP tools.
 # Users without the listed group will get a permission-denied error.
+#
+# Domain-plugin tools (HR / Sales / Project / Helpdesk) require the
+# *base user* group of that domain by default — adjust per-tool if you
+# want managers-only access. The manager groups can call everything a
+# regular user can plus the manager-only entries below.
 tool_group_requirements:
   delete_record:
     - base.group_system                  # only admins can delete
@@ -15,6 +20,61 @@ tool_group_requirements:
     - base.group_user                    # any internal user
   create_record:
     - base.group_user
+
+  # ── Sales ──────────────────────────────────────────────────────
+  get_my_quotations:
+    - sales_team.group_sale_salesman
+    - sales_team.group_sale_manager
+  get_order_details:
+    - sales_team.group_sale_salesman
+    - sales_team.group_sale_manager
+  confirm_order:
+    - sales_team.group_sale_salesman
+    - sales_team.group_sale_manager
+  get_sales_summary:
+    - sales_team.group_sale_salesman_all_leads
+    - sales_team.group_sale_manager
+
+  # ── Project ────────────────────────────────────────────────────
+  get_my_tasks:
+    - project.group_project_user
+    - project.group_project_manager
+  update_task_stage:
+    - project.group_project_user
+    - project.group_project_manager
+  get_project_summary:
+    - project.group_project_user
+    - project.group_project_manager
+
+  # ── Helpdesk ───────────────────────────────────────────────────
+  get_my_tickets:
+    - helpdesk.group_helpdesk_user
+    - helpdesk.group_helpdesk_manager
+  create_ticket:
+    - helpdesk.group_helpdesk_user
+    - helpdesk.group_helpdesk_manager
+  update_ticket_stage:
+    - helpdesk.group_helpdesk_user
+    - helpdesk.group_helpdesk_manager
+
+  # ── HR ─────────────────────────────────────────────────────────
+  get_my_profile:
+    - base.group_user                    # any logged-in internal user
+  get_my_attendance:
+    - base.group_user
+  check_in:
+    - base.group_user
+  check_out:
+    - base.group_user
+  get_my_leaves:
+    - base.group_user
+  request_leave:
+    - base.group_user
+
+  # ── Accounting (uncomment if you publish accounting tools) ─────
+  # get_my_invoices:
+  #   - account.group_account_invoice
+  #   - account.group_account_manager
 
 # Fields that are redacted (replaced with "***") for users who lack
 # the specified group.  This runs AFTER Odoo's own field ACLs.

@@ -1,4 +1,19 @@
-"""Workflow definition for helpdesk.ticket (Helpdesk Ticket)."""
+"""Workflow definition for helpdesk.ticket (Helpdesk Ticket).
+
+Unlike ``sale.order`` / ``purchase.order`` which expose dedicated server
+methods (``action_confirm``, ``button_validate``…), the ``helpdesk.ticket``
+state machine is driven entirely by writing ``stage_id`` (a many2one to
+``helpdesk.stage``). There are no Odoo-provided action methods named
+``assign_ticket`` / ``resolve_ticket`` / ``close_ticket`` / ``reopen_ticket``
+— attempting to call them via ``execute_method`` raises
+``method does not exist``.
+
+This workflow definition therefore models transitions as **field-write
+documentation** rather than method calls. Each ``TransitionDef.action``
+uses the special prefix ``write:`` to signal to ``get_record_actions`` /
+``execute_method`` that the transition is performed via ``update_record``
+on the ``stage_id`` field (which the gateway already supports).
+"""
 
 from __future__ import annotations
 
@@ -15,10 +30,11 @@ def get_workflow() -> WorkflowDef:
     """Return the helpdesk.ticket workflow definition.
 
     Helpdesk tickets use stage_id (a many2one to helpdesk.stage) rather
-    than a fixed selection field. Stages are configurable per team, so
-    the states defined here represent the typical default configuration.
-
-    The workflow documents common actions rather than fixed transitions.
+    than a fixed selection field. Stages are configurable per team.
+    Transitions are performed by writing ``stage_id`` via
+    ``update_record`` — the ``action`` strings below are documentation
+    only (the ``write:`` prefix denotes this; they are not method names
+    on the server).
     """
     return WorkflowDef(
         model="helpdesk.ticket",
@@ -30,12 +46,15 @@ def get_workflow() -> WorkflowDef:
                 label="New",
                 transitions=(
                     TransitionDef(
-                        action="assign_ticket",
+                        action="write:stage_id",
                         target_state="in_progress",
-                        label="Assign",
+                        label="Move to 'In Progress'",
                         description=(
-                            "Assign the ticket to a user. Set the "
-                            "user_id field via update_record."
+                            "Move the ticket to the 'In Progress' stage. "
+                            "Perform via `update_record(model='helpdesk.ticket', "
+                            "record_id=<id>, values={'stage_id': <stage_id>})`. "
+                            "Optionally set user_id at the same time to "
+                            "assign an owner."
                         ),
                     ),
                 ),
@@ -45,13 +64,15 @@ def get_workflow() -> WorkflowDef:
                 label="In Progress",
                 transitions=(
                     TransitionDef(
-                        action="resolve_ticket",
+                        action="write:stage_id",
                         target_state="solved",
-                        label="Resolve",
+                        label="Move to 'Solved'",
                         description=(
-                            "Mark the ticket as solved. Move to the "
-                            "'Solved' stage via update_record on "
-                            "stage_id."
+                            "Mark the ticket as solved by moving to the "
+                            "'Solved' stage. Perform via "
+                            "`update_record(model='helpdesk.ticket', "
+                            "record_id=<id>, values={'stage_id': "
+                            "<solved_stage_id>})`."
                         ),
                     ),
                 ),
@@ -61,22 +82,23 @@ def get_workflow() -> WorkflowDef:
                 label="Solved",
                 transitions=(
                     TransitionDef(
-                        action="close_ticket",
+                        action="write:stage_id",
                         target_state="closed",
-                        label="Close",
+                        label="Move to 'Closed' / 'Done'",
                         description=(
-                            "Close the resolved ticket. Move to the "
-                            "'Closed' / 'Done' stage via update_record "
-                            "on stage_id."
+                            "Close the resolved ticket by moving to the "
+                            "'Closed' / 'Done' stage via update_record on "
+                            "stage_id."
                         ),
                     ),
                     TransitionDef(
-                        action="reopen_ticket",
+                        action="write:stage_id",
                         target_state="in_progress",
-                        label="Reopen",
+                        label="Reopen — move back to 'In Progress'",
                         description=(
                             "Reopen the ticket if the issue recurs. "
-                            "Move back to the 'In Progress' stage."
+                            "Move back to the 'In Progress' stage via "
+                            "update_record on stage_id."
                         ),
                     ),
                 ),
@@ -122,8 +144,19 @@ def get_workflow() -> WorkflowDef:
                 "configuration. Use search_read on helpdesk.stage with "
                 "domain [['team_ids', 'in', [team_id]]] to discover "
                 "available stages for a team. Transition between stages "
-                "by updating stage_id via update_record."
+                "by updating stage_id via update_record — NOT via "
+                "execute_method (there are no Odoo-side action methods "
+                "for ticket stage transitions)."
             ),
         ),
-        version_notes={},
+        version_notes={
+            "17": "Stages and methods follow the v16 model — stage_id-driven.",
+            "18": "Same as v17 — no new ticket action methods introduced.",
+            "19": (
+                "Same as v18. The gateway intentionally exposes "
+                "'write:stage_id' transitions rather than synthetic "
+                "method names so callers don't call non-existent "
+                "Odoo methods like 'assign_ticket'."
+            ),
+        },
     )

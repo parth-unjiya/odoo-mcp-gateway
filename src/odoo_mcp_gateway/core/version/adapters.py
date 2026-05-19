@@ -12,6 +12,12 @@ from odoo_mcp_gateway.core.version.detector import VersionInfo
 class VersionAdapter(ABC):
     """Abstract interface for version-specific behaviour."""
 
+    #: The Odoo major version this adapter targets (e.g. ``17``).
+    #: Subclasses override with a concrete integer so callers can run
+    #: version comparisons (``adapter.major_version >= 18``) without
+    #: re-parsing the detected version string.
+    major_version: int = 0
+
     @abstractmethod
     def get_session_info_fields(self) -> list[str]: ...
 
@@ -57,6 +63,8 @@ class VersionAdapter(ABC):
 class V17Adapter(VersionAdapter):
     """Adapter for Odoo 17."""
 
+    major_version = 17
+
     def get_session_info_fields(self) -> list[str]:
         return [
             "uid",
@@ -78,6 +86,8 @@ class V17Adapter(VersionAdapter):
 
 class V18Adapter(VersionAdapter):
     """Adapter for Odoo 18."""
+
+    major_version = 18
 
     def get_session_info_fields(self) -> list[str]:
         return [
@@ -116,6 +126,8 @@ _V19_FIELD_REMOVALS: dict[str, frozenset[str]] = {
 class V19Adapter(VersionAdapter):
     """Adapter for Odoo 19."""
 
+    major_version = 19
+
     def get_session_info_fields(self) -> list[str]:
         return [
             "uid",
@@ -128,11 +140,31 @@ class V19Adapter(VersionAdapter):
         ]
 
     def normalize_domain(self, domain: list[Any]) -> list[Any]:
+        """Normalize a domain for Odoo 19.
+
+        TODO (v0.3.0): Walk each ``(field, op, value)`` leaf and:
+          * rewrite ``field`` via :meth:`get_renamed_fields` for the
+            current model (requires plumbing ``model`` through the
+            signature, or attaching it to the adapter call site);
+          * raise a clearer error — or strip the leaf — for any field
+            in :meth:`get_removed_fields`.
+
+        Identity for now so v17/v18 behaviour is preserved exactly.
+        Implementing this without an integration test against a real
+        v19 instance risks silently breaking domain logic, so it is
+        intentionally deferred.
+        """
         return list(domain)
 
     def normalize_context(self, context: dict[str, Any]) -> dict[str, Any]:
-        # Odoo 19 may introduce new default context keys; copy to avoid
-        # mutation and strip unknown keys if needed.
+        """Normalize an execution context for Odoo 19.
+
+        TODO (v0.3.0): Translate v17/v18 context keys that were renamed
+        or removed in v19 (e.g. legacy ``force_company`` -> the v19
+        ``allowed_company_ids`` semantics).  Today we just return a
+        shallow copy to avoid surprising mutation — the same behaviour
+        as v17/v18 adapters.
+        """
         return dict(context)
 
     def supports_bearer_token(self) -> bool:

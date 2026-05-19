@@ -42,8 +42,16 @@ stock_models:
     - hr.attendance
     - hr.leave
     - hr.leave.type
+    - hr.leave.allocation
     - helpdesk.ticket
     - helpdesk.team
+    - helpdesk.stage
+    # Accounting (typically requires account.group_account_user
+    # or account.group_account_invoice — see rbac.yaml for tool
+    # gating, ir.model.access is the ultimate enforcer in Odoo)
+    - account.journal
+    - account.account
+    - account.payment.method
     # NOTE: mail.message, mail.followers, and mail.activity are hardcoded
     # as read-only in the gateway to prevent message injection and activity
     # spoofing.  They are readable but writes are always blocked.
@@ -62,11 +70,11 @@ stock_models:
     - res.partner.title
     - uom.uom
     - uom.category
-    - account.account
     - account.tax
-    - account.journal
     - account.fiscal.position
     - account.payment.term
+    - account.analytic.account
+    - account.analytic.line
     - stock.warehouse.orderpoint
     - product.supplierinfo
     - hr.job
@@ -105,7 +113,8 @@ allowed_methods:
     - action_cancel
     - action_draft
     - action_quotation_send
-    - action_done
+    - action_done                        # Odoo 17 only
+    - action_lock                        # Odoo 18+ / 19
     - _compute_amount
 
   purchase.order:
@@ -113,6 +122,7 @@ allowed_methods:
     - button_cancel
     - button_draft
     - button_approve
+    - button_done                        # Odoo 17 / early 18
     - action_create_invoice
 
   stock.picking:

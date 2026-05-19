@@ -2,7 +2,48 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# Patterns that suggest the value is HTML/script content a downstream
+# renderer might interpret. Kept narrow on purpose: we are NOT trying to
+# scrub Odoo's stored HTML (some fields legitimately contain markup —
+# signatures, mail templates, web pages). The defence-in-depth here is
+# only against the specific case where an attacker stored ``<script>``
+# inside, say, a partner name and a chat client renders the markdown
+# table as HTML. ``format_records`` is the rendering boundary; the
+# underlying JSON-RPC payload is unchanged.
+_HTML_DANGEROUS_RE = re.compile(
+    # Tag-name-anchored: <script>, <iframe>, ...
+    r"<\s*(?:script|iframe|object|embed|svg|style|"
+    r"meta\s+[^>]*http-equiv)"
+    # OR inline event handler on ANY tag: '<img ... onerror=...>'
+    r"|<\s*\w+[^>]*\son\w+\s*="
+    # OR javascript: URI in href / src / etc.
+    r"|javascript\s*:",
+    re.IGNORECASE,
+)
+_HTML_TRANSLATE = str.maketrans(
+    {
+        "<": "&lt;",
+        ">": "&gt;",
+        # Don't escape & — it produces &amp;amp; chains when the value
+        # already contains entities. The dangerous escape vectors are
+        # angle brackets; entities alone cannot execute.
+    }
+)
+
+
+def _escape_if_unsafe(text: str) -> str:
+    """Escape angle brackets only when dangerous markup is detected.
+
+    Leaves benign content (URLs containing `&`, accented characters,
+    JSON-looking strings) untouched. The check is a fast regex pre-pass
+    so the common case (no markup) costs one search and one return.
+    """
+    if _HTML_DANGEROUS_RE.search(text):
+        return text.translate(_HTML_TRANSLATE)
+    return text
 
 
 def format_records(
@@ -31,7 +72,9 @@ def _format_detailed(records: list[dict[str, Any]], model: str) -> str:
             header += f" (ID: {rec['id']})"
         if "name" in rec or "display_name" in rec:
             name = rec.get("display_name") or rec.get("name", "")
-            header += f" — {name}"
+            # Run the XSS guard on the name header too — it skipped
+            # ``_format_value`` because of direct string interpolation.
+            header += f" — {_escape_if_unsafe(str(name))}"
         lines.append(header)
         for key, value in rec.items():
             if key in ("id", "name", "display_name"):
@@ -93,8 +136,8 @@ def _format_value(value: Any, max_len: int = 100) -> str:
 
     text = str(value)
     if len(text) > max_len:
-        return text[: max_len - 3] + "..."
-    return text
+        text = text[: max_len - 3] + "..."
+    return _escape_if_unsafe(text)
 
 
 def normalize_datetime(value: str | None) -> str:

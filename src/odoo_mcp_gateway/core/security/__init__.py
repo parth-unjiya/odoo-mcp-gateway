@@ -11,9 +11,11 @@ from .config_loader import (
     load_config,
 )
 from .middleware import (
+    DANGEROUS_CONTEXT_KEYS,
     SecurityContext,
     SecurityError,
     SecurityMiddleware,
+    filter_dangerous_context_keys,
     register_tool_operation,
     register_tool_operations,
     security_gate,
@@ -24,6 +26,7 @@ from .restrictions import RestrictionChecker
 from .sanitizer import ErrorSanitizer
 
 __all__ = [
+    "DANGEROUS_CONTEXT_KEYS",
     "AuditEntry",
     "AuditLogger",
     "ErrorSanitizer",
@@ -40,6 +43,7 @@ __all__ = [
     "SecurityError",
     "SecurityMiddleware",
     "TokenBucket",
+    "filter_dangerous_context_keys",
     "load_config",
     "register_tool_operation",
     "register_tool_operations",

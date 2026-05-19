@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
 
-from odoo_mcp_gateway.core.security import security_gate
+from odoo_mcp_gateway.core.security import (
+    DANGEROUS_CONTEXT_KEYS,
+    filter_dangerous_context_keys,
+    security_gate,
+)
 from odoo_mcp_gateway.server import (
     _get_auth_manager,
     _get_client,
@@ -24,6 +28,101 @@ if TYPE_CHECKING:
     from odoo_mcp_gateway.server import GatewayContext
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_field_renames(
+    gateway: GatewayContext,
+    model: str,
+    fields: list[str] | None,
+) -> list[str] | None:
+    """Translate user-supplied field names to version-appropriate aliases.
+
+    If the active version adapter knows that, e.g., ``tax_id`` was renamed
+    to ``tax_ids`` on ``sale.order.line`` in Odoo 19, this rewrites the
+    request before Odoo sees it — sparing the AI client a raw KeyError.
+
+    Returns the (possibly rewritten) list, or the original input when no
+    adapter is loaded or no renames apply.
+    """
+    if not fields:
+        return fields
+    adapter = getattr(gateway, "version_adapter", None)
+    if adapter is None:
+        return fields
+    try:
+        renames = adapter.get_renamed_fields(model)
+    except Exception:
+        # An adapter bug must never block CRUD; just log and pass through.
+        logger.debug("Adapter.get_renamed_fields failed for %s", model, exc_info=True)
+        return fields
+    if not renames:
+        return fields
+    return [renames.get(f, f) for f in fields]
+
+
+def _apply_field_renames_with_suffix(
+    gateway: GatewayContext,
+    model: str,
+    fields: list[str] | None,
+) -> list[str] | None:
+    """Apply renames to fields that may carry an Odoo suffix (``:sum``, ``:month``).
+
+    Used by ``read_group`` where the input is e.g. ``["amount_total:sum"]``
+    or ``["create_date:month"]``.  The suffix is preserved verbatim.
+    """
+    if not fields:
+        return fields
+    adapter = getattr(gateway, "version_adapter", None)
+    if adapter is None:
+        return fields
+    try:
+        renames = adapter.get_renamed_fields(model)
+    except Exception:
+        logger.debug("Adapter.get_renamed_fields failed for %s", model, exc_info=True)
+        return fields
+    if not renames:
+        return fields
+    out: list[str] = []
+    for f in fields:
+        # Split once on ':' — dotted paths (partner_id.name) don't use ':'
+        base, sep, suffix = f.partition(":")
+        new_base = renames.get(base, base)
+        out.append(f"{new_base}{sep}{suffix}" if sep else new_base)
+    return out
+
+
+def _apply_value_renames(
+    gateway: GatewayContext,
+    model: str,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    """Translate user-supplied field names in a write/create values dict.
+
+    Mirrors :func:`_apply_field_renames` but for the keys of the
+    ``values`` mapping passed to ``create``/``write``.
+    """
+    if not values:
+        return values
+    adapter = getattr(gateway, "version_adapter", None)
+    if adapter is None:
+        return values
+    try:
+        renames = adapter.get_renamed_fields(model)
+    except Exception:
+        logger.debug("Adapter.get_renamed_fields failed for %s", model, exc_info=True)
+        return values
+    if not renames:
+        return values
+    # If the caller supplied BOTH old and new names, the explicit new name
+    # wins (don't clobber it by overwriting with the rewritten old value).
+    rewritten: dict[str, Any] = {}
+    for key, val in values.items():
+        new_key = renames.get(key, key)
+        if new_key in rewritten and new_key != key:
+            continue
+        rewritten[new_key] = val
+    return rewritten
+
 
 _MAX_LIMIT = 500
 _FIELD_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
@@ -55,7 +154,14 @@ def _validate_method(method: str) -> str:
     return method
 
 
-_AGG_FIELD_RE = re.compile(r"^[a-z][a-z0-9_]*(?::[a-z]+)?$")
+# Aggregate field suffix MUST be a closed allowlist matching Odoo's
+# read_group spec. Previously this matched any ``[a-z]+`` which accepted
+# garbage like ``amount_total:rmrf`` and only failed at Odoo's SQL
+# planner with a leakable error message.
+_AGG_FIELD_RE = re.compile(
+    r"^[a-z][a-z0-9_]*"
+    r"(?::(?:sum|avg|min|max|count|count_distinct|array_agg|bool_and|bool_or))?$"
+)
 _GROUPBY_FIELD_RE = re.compile(
     r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*(?::(day|week|month|quarter|year))?$"
 )
@@ -128,6 +234,179 @@ _MAX_VALUES_DEPTH = 5
 _MAX_STRING_VALUE_LEN = 65_536
 
 
+def _reject_id_field(values: dict[str, Any]) -> str | None:
+    """Reject explicit ``id`` in a write/create payload.
+
+    Odoo silently ignores ``id`` on create and write, which means a caller
+    asking to "update id" gets ``success: True`` for a no-op. Surface this
+    as a clear error so the caller knows primary keys are immutable.
+    Returns an error string when rejected, ``None`` otherwise.
+    """
+    if "id" in values:
+        return (
+            "Cannot set or modify 'id' field — primary keys are immutable "
+            "and assigned by Odoo. Remove 'id' from values."
+        )
+    return None
+
+
+async def _validate_writable_fields(
+    gateway: GatewayContext,
+    client: Any,
+    model: str,
+    values: dict[str, Any],
+    check_required_non_empty: bool = False,
+) -> str | None:
+    """Pre-flight check: reject writes to readonly/computed fields.
+
+    Odoo silently ignores writes to readonly/computed fields, which gives
+    callers a false ``success: True`` response. Use the field inspector to
+    catch this before the call.
+
+    Two related guards are applied:
+
+    * Required-field empty-write rejection is ALWAYS on. Writing
+      ``""`` to a required field is a silent-no-op on Odoo's side and
+      surfaces as false-success — we reject regardless of whether the
+      call is create or update.
+    * ``check_required_non_empty`` (the caller flag) extends the check
+      to *missing required fields* on create. For update we don't
+      enforce this because partial updates legitimately omit fields.
+
+    Returns an error string on rejection, or ``None`` to proceed. Falls
+    through silently when field inspection itself fails (defense-in-depth:
+    Odoo will still apply its own ACLs).
+    """
+    try:
+        field_info = await gateway.field_inspector.get_fields(client, model)
+    except Exception:
+        logger.debug("Field inspection failed for %s; skipping pre-flight", model)
+        return None
+
+    if not field_info:
+        return None
+
+    readonly_fields = [f for f in values if f in field_info and field_info[f].readonly]
+    if readonly_fields:
+        return (
+            f"Cannot write to readonly/computed fields: {sorted(readonly_fields)}. "
+            "These are computed by Odoo and cannot be set directly."
+        )
+
+    # Always: reject empty/whitespace-only strings for required fields.
+    # This applies to BOTH create and update — Odoo silently ignores
+    # such writes on update, leaving the field unchanged and returning
+    # success, which is the canonical silent-success failure mode.
+    empty_required: list[str] = []
+    for fname, val in values.items():
+        info = field_info.get(fname)
+        if info is None or not info.required:
+            continue
+        if isinstance(val, str) and not val.strip():
+            empty_required.append(fname)
+    if empty_required:
+        return (
+            f"Required field(s) {sorted(empty_required)} cannot be "
+            "empty or whitespace-only — Odoo would silently ignore the "
+            "write."
+        )
+
+    # Type-level validation for known field types. We don't recurse into
+    # nested writes (many2one tuples, one2many commands); those are
+    # Odoo's responsibility. We only catch the common "obvious wrong type"
+    # cases that Odoo silently rejects or coerces.
+    type_errors: list[str] = []
+    for fname, val in values.items():
+        info = field_info.get(fname)
+        if info is None:
+            continue
+        # Skip None / explicit-clear values
+        if val is None or val is False:
+            continue
+
+        ftype = getattr(info, "field_type", "") or ""
+
+        # Date / Datetime: must look like a valid Odoo date string.
+        if ftype in ("date", "datetime") and isinstance(val, str):
+            if not _is_plausible_odoo_date(val, datetime_ok=ftype == "datetime"):
+                expected = (
+                    "date (YYYY-MM-DD)"
+                    if ftype == "date"
+                    else "datetime (YYYY-MM-DD HH:MM:SS)"
+                )
+                type_errors.append(f"{fname}={val!r}: not a valid {expected}")
+
+        # Selection: value must be one of the allowed selection keys.
+        elif ftype == "selection":
+            selection = getattr(info, "selection", None) or []
+            if selection:
+                allowed_keys = {str(k) for k, _label in selection}
+                if str(val) not in allowed_keys:
+                    type_errors.append(
+                        f"{fname}={val!r}: not in allowed values {sorted(allowed_keys)}"
+                    )
+
+        # Integer field with a string value Odoo would coerce or reject.
+        elif ftype == "integer" and isinstance(val, str):
+            try:
+                int(val)
+            except ValueError:
+                type_errors.append(f"{fname}={val!r}: not a valid integer")
+
+        # Float / Monetary: same pattern.
+        elif ftype in ("float", "monetary") and isinstance(val, str):
+            try:
+                float(val)
+            except ValueError:
+                type_errors.append(f"{fname}={val!r}: not a valid number")
+
+        # Boolean: accept True/False, the strings "true"/"false"/"1"/"0",
+        # and 0/1. Anything else is suspicious.
+        elif ftype == "boolean" and not isinstance(val, bool):
+            if not (
+                val in (0, 1)
+                or (isinstance(val, str) and val.lower() in ("true", "false", "1", "0"))
+            ):
+                type_errors.append(f"{fname}={val!r}: not a valid boolean")
+
+    if type_errors:
+        return "Invalid value(s) for field type: " + "; ".join(type_errors)
+
+    return None
+
+
+_DATE_VALIDATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATETIME_VALIDATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?$")
+
+
+def _is_plausible_odoo_date(s: str, datetime_ok: bool = False) -> bool:
+    """Return True if ``s`` looks like a valid Odoo date / datetime string.
+
+    Performs both regex shape check AND a calendar-validity check via
+    ``datetime.strptime`` (so ``"2026-13-99"`` is rejected even though it
+    matches the regex).
+    """
+    from datetime import datetime as _dt
+
+    # Datetime forms allowed only when datetime_ok is True
+    if datetime_ok and _DATETIME_VALIDATE_RE.match(s):
+        # Strip optional fractional seconds for strptime
+        core = s.split(".", 1)[0].replace("T", " ")
+        try:
+            _dt.strptime(core, "%Y-%m-%d %H:%M:%S")
+            return True
+        except ValueError:
+            return False
+
+    if _DATE_VALIDATE_RE.match(s):
+        try:
+            _dt.strptime(s, "%Y-%m-%d")
+            return True
+        except ValueError:
+            return False
+    return False
+
+
 def _validate_write_values(values: dict[str, Any]) -> None:
     """Validate write values size and depth. Raises ValueError if invalid."""
     try:
@@ -152,25 +431,11 @@ def _validate_write_values(values: dict[str, Any]) -> None:
     _check(values)
 
 
-# Odoo context keys that can bypass security controls or audit trails.
-# These are stripped from kwargs["context"] in execute_method to prevent
-# attackers from disabling archived-record filtering, audit logging,
-# mail tracking, or cross-company access boundaries.
-_DANGEROUS_CONTEXT_KEYS = frozenset(
-    {
-        "active_test",
-        "tracking_disable",
-        "mail_create_nolog",
-        "mail_create_nosubscribe",
-        "mail_notrack",
-        "force_company",
-        "allowed_company_ids",
-        "default_company_id",
-        "no_reset_password",
-        "import_compat",
-        "check_move_validity",
-    }
-)
+# Re-export of the canonical context-key filter from core.security.
+# Kept as a module-level alias so existing tests importing the private
+# name continue to work — new code SHOULD import the public symbol
+# from core.security directly.
+_DANGEROUS_CONTEXT_KEYS = DANGEROUS_CONTEXT_KEYS
 
 # ORM methods that are already exposed through dedicated CRUD tools.
 # Blocking them in execute_method prevents bypassing field-level checks.
@@ -209,25 +474,54 @@ _BLOCKED_ORM_METHODS = frozenset(
 
 
 def _validate_order(order: str | None) -> str:
-    """Validate and reconstruct a clean ORDER BY clause."""
+    """Validate and reconstruct a clean ORDER BY clause.
+
+    Accepted forms (comma-separated):
+        * ``field``
+        * ``field asc`` / ``field desc``
+        * ``a.b.c desc``  (up to MAX_FIELD_TRAVERSAL dotted segments)
+
+    Rejects the common typo ``field,desc`` (comma instead of space)
+    that the previous validator silently accepted as two ascending
+    fields. The shared traversal-depth constant from ``domain_builder``
+    is used so order-clauses and domain-leaves stay in sync.
+    """
+    # Late import to avoid a top-level cycle (crud imports utils).
+    from odoo_mcp_gateway.utils.domain_builder import MAX_FIELD_TRAVERSAL
+
     if not order or not order.strip():
         return ""
     clean_parts = []
+    directions = {"asc", "desc"}
     for part in order.split(","):
         tokens = part.strip().split()
         if not tokens:
             continue
         if len(tokens) > 2:
             raise ValueError(f"Invalid order clause: {part.strip()!r}")
+        # If this part has no direction AND looks like 'asc'/'desc' on
+        # its own, the caller almost certainly meant to attach it to
+        # the previous part with a space, not a comma. Catch this
+        # specific typo with a clear message instead of silently
+        # accepting 'desc' as a (non-existent) field name.
+        if len(tokens) == 1 and tokens[0].lower() in directions:
+            raise ValueError(
+                f"Invalid order clause: {part.strip()!r} — direction "
+                "must follow a field, separated by a space (e.g. "
+                "'create_date desc'), not by a comma."
+            )
         field = tokens[0]
-        if field.count(".") > 3:
-            raise ValueError(f"Field traversal too deep in order: {field!r}")
+        if field.count(".") >= MAX_FIELD_TRAVERSAL:
+            raise ValueError(
+                f"Field traversal too deep in order: {field!r} "
+                f"(max {MAX_FIELD_TRAVERSAL} segments)"
+            )
         if not _FIELD_RE.match(field):
             raise ValueError(f"Invalid field in order: {field!r}")
         direction = "asc"
         if len(tokens) == 2:
             direction = tokens[1].lower()
-            if direction not in ("asc", "desc"):
+            if direction not in directions:
                 raise ValueError(f"Invalid sort direction: {tokens[1]!r}")
         clean_parts.append(f"{field} {direction}")
     return ", ".join(clean_parts)
@@ -281,6 +575,13 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if fields:
                 _validate_fields(fields)
 
+            # Reject non-positive limits before clamping. Otherwise
+            # max(1, min(0, _MAX_LIMIT)) silently returns 1, which lets
+            # ``limit=0`` (often "no results, please") sneak through and
+            # return a single row.
+            if limit <= 0:
+                return {"error": "limit must be a positive integer (>=1)"}
+
             # Smart field selection if none specified
             if not fields:
                 try:
@@ -297,9 +598,12 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                     # Fail safe: use a minimal field set rather than letting Odoo decide
                     fields = ["id", "display_name"]
 
-            # Clamp limit and offset
-            limit = max(1, min(limit, _MAX_LIMIT))
+            # Clamp limit and offset (limit is already > 0 here)
+            limit = min(limit, _MAX_LIMIT)
             offset = max(0, offset)
+
+            # Apply version-specific field renames (e.g. v19 tax_id -> tax_ids)
+            fields = _apply_field_renames(gateway, model, fields)
 
             kwargs: dict[str, Any] = {
                 "fields": fields,
@@ -375,6 +679,8 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             kwargs: dict[str, Any] = {}
             if fields:
                 _validate_fields(fields)
+                # Apply version-specific field renames
+                fields = _apply_field_renames(gateway, model, fields)
                 kwargs["fields"] = fields
 
             records = await client.execute_kw(
@@ -492,6 +798,12 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if restriction_msg:
                 return {"error": restriction_msg}
 
+            # Reject explicit 'id' before any other validation — Odoo
+            # silently ignores it on create, hiding the caller's mistake.
+            id_msg = _reject_id_field(values)
+            if id_msg:
+                return {"error": id_msg}
+
             # Validate write values size/depth and field names
             _validate_write_values(values)
             for field_name in values:
@@ -515,6 +827,23 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 user_groups,
                 is_admin,
             )
+
+            # Apply version-specific field renames on the values payload
+            values = _apply_value_renames(gateway, model, values)
+
+            # Pre-flight: catch readonly/computed fields and empty required
+            # values before Odoo silently swallows them. Runs for BOTH real
+            # and dry_run modes — dry_run must surface the same errors as a
+            # real call to be a useful preview.
+            writable_msg = await _validate_writable_fields(
+                gateway,
+                client,
+                model,
+                values,
+                check_required_non_empty=True,
+            )
+            if writable_msg:
+                return {"error": writable_msg}
 
             if dry_run:
                 return {
@@ -580,6 +909,12 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if restriction_msg:
                 return {"error": restriction_msg}
 
+            # Reject explicit 'id' — primary keys are immutable. Without
+            # this guard, Odoo silently ignores it and returns success.
+            id_msg = _reject_id_field(values)
+            if id_msg:
+                return {"error": id_msg}
+
             # Validate write values size/depth and field names
             _validate_write_values(values)
             for field_name in values:
@@ -603,6 +938,24 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 user_groups,
                 is_admin,
             )
+
+            # Apply version-specific field renames on the values payload
+            values = _apply_value_renames(gateway, model, values)
+
+            # Pre-flight: catch readonly/computed fields before Odoo
+            # silently swallows the write. Runs for BOTH real and dry_run
+            # modes so dry_run is a faithful preview. Empty-required
+            # checks are skipped on update — partial updates with "" may
+            # be valid (e.g. clearing an optional field).
+            writable_msg = await _validate_writable_fields(
+                gateway,
+                client,
+                model,
+                values,
+                check_required_non_empty=False,
+            )
+            if writable_msg:
+                return {"error": writable_msg}
 
             if dry_run:
                 return {
@@ -733,17 +1086,55 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if orderby:
                 orderby = _validate_order(orderby)
 
+            # Reject non-positive explicit limits. ``limit=None`` keeps the
+            # default cap of 500 (no caller-supplied limit at all).
+            if limit is not None and limit <= 0:
+                return {"error": "limit must be a positive integer (>=1)"}
+
+            # Apply version-specific field renames (preserving Odoo suffixes
+            # like ``:sum`` on aggregate fields and ``:month`` on groupby).
+            renamed = _apply_field_renames_with_suffix(gateway, model, fields)
+            fields = renamed if renamed is not None else fields
+            renamed_groupby = _apply_field_renames_with_suffix(gateway, model, groupby)
+            groupby = renamed_groupby if renamed_groupby is not None else groupby
+
             kwargs: dict[str, Any] = {}
-            kwargs["limit"] = max(1, min(limit if limit is not None else 500, 500))
+            kwargs["limit"] = min(limit if limit is not None else 500, 500)
             if orderby:
                 kwargs["orderby"] = orderby
 
-            result = await client.execute_kw(
-                model,
-                "read_group",
-                [safe_domain, fields, groupby],
-                kwargs,
-            )
+            # `read_group` is deprecated in Odoo 17+ in favor of
+            # `formatted_read_group` / `web_read_group`. Today it still
+            # works, but it will eventually disappear. If the server
+            # rejects the call as "not found", fall back to the newer
+            # method so this tool keeps working across Odoo versions.
+            try:
+                result = await client.execute_kw(
+                    model,
+                    "read_group",
+                    [safe_domain, fields, groupby],
+                    kwargs,
+                )
+            except Exception as exc:
+                msg = str(exc).lower()
+                if (
+                    "not exist" in msg
+                    or "no attribute" in msg
+                    or "not found" in msg
+                    or "is not a valid method" in msg
+                ):
+                    try:
+                        result = await client.execute_kw(
+                            model,
+                            "formatted_read_group",
+                            [safe_domain, fields, groupby],
+                            kwargs,
+                        )
+                    except Exception:
+                        # Re-raise the original error if neither works
+                        raise exc from None
+                else:
+                    raise
 
             # Apply RBAC field filtering to grouped results
             groups = result if isinstance(result, list) else []
@@ -907,6 +1298,34 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if restriction_msg:
                 return {"error": restriction_msg}
 
+            # Field-write restriction parity with create_record /
+            # update_record. Without this, an attacker could probe
+            # whether a sensitive field (password, api_key) triggers
+            # an onchange and infer field existence on the model — a
+            # low-severity but real recon vector. We don't actually
+            # WRITE these fields here (onchange is read-only) but
+            # advertising that the gateway would honour them is the
+            # same disclosure surface.
+            for vk in list(values.keys()):
+                fw_msg = gateway.restrictions.check_field_write(model, vk, is_admin)
+                if fw_msg:
+                    return {"error": fw_msg}
+
+            # Version-adapter field rename parity. ``create_record`` and
+            # ``update_record`` apply ``_apply_value_renames`` so callers
+            # using v18 field names (e.g. ``tax_id``) hit the right v19
+            # field (``tax_ids``). ``get_onchange`` previously skipped
+            # this and silently forwarded the deprecated name. Apply the
+            # rename to both ``values`` and ``changed_field`` so the
+            # whole call shape is version-coherent.
+            values = _apply_value_renames(gateway, model, values)
+            renamed_single = _apply_field_renames(gateway, model, [changed_field])
+            # _apply_field_renames returns None only for falsy input; we
+            # always pass [changed_field] which is non-empty.
+            changed_field = (renamed_single or [changed_field])[0]
+            if fields:
+                fields = _apply_field_renames(gateway, model, fields) or fields
+
             # Build the onchange spec
             field_onchange = {f: "" for f in (fields or list(values.keys()))}
             # Make sure changed_field is in the spec
@@ -920,6 +1339,16 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             )
 
             changes = result.get("value", {}) if isinstance(result, dict) else {}
+            warnings = result.get("warning") if isinstance(result, dict) else None
+
+            # Detect Odoo 18+ deprecated-onchange behavior:
+            # If we got an empty dict result OR an empty value with no warning,
+            # the model may have migrated to web_save/computed fields and the
+            # onchange API no longer triggers. Surface a hint to the caller.
+            is_empty_result = (isinstance(result, dict) and not result) or (
+                not changes and not warnings
+            )
+            api_status = "no_changes_or_unsupported" if is_empty_result else "ok"
 
             # Apply RBAC field filtering on onchange results
             if isinstance(changes, dict) and changes:
@@ -931,11 +1360,20 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 )
                 changes = filtered[0]
 
-            return {
+            response: dict[str, Any] = {
                 "changes": changes,
-                "warnings": result.get("warning") if isinstance(result, dict) else None,
+                "warnings": warnings,
                 "model": model,
+                "_api_status": api_status,
             }
+            if is_empty_result:
+                response["_api_hint"] = (
+                    "No onchange triggered for this model. This may be "
+                    "normal, or the model may have moved to computed "
+                    "fields on Odoo 18+. Verify by reading the record "
+                    "after writing."
+                )
+            return response
 
         except ValueError as e:
             return {"error": str(e)}
@@ -1012,13 +1450,15 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             # Sanitize dangerous context keys from kwargs to prevent
             # bypassing archived-record filtering, audit trails,
             # mail tracking, or cross-company access boundaries.
-            if kwargs and "context" in kwargs:
-                ctx = kwargs["context"]
-                if isinstance(ctx, dict):
-                    stripped = {
-                        k: v for k, v in ctx.items() if k not in _DANGEROUS_CONTEXT_KEYS
-                    }
-                    kwargs = {**kwargs, "context": stripped}
+            # Uses the shared helper from core.security so every tool
+            # accepting a ``context`` kwarg filters the same way.
+            stripped_context_keys: list[str] = []
+            sanitized_kwargs: dict[str, Any] = dict(kwargs or {})
+            if "context" in sanitized_kwargs:
+                safe_ctx, stripped_context_keys = filter_dangerous_context_keys(
+                    sanitized_kwargs["context"]
+                )
+                sanitized_kwargs["context"] = safe_ctx
 
             # Validate and prepend record_ids if provided
             call_args: list[Any] = []
@@ -1027,29 +1467,49 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                     return {"error": "record_ids must not be empty"}
                 if len(record_ids) > _MAX_LIMIT:
                     return {"error": f"Too many record_ids (max {_MAX_LIMIT})"}
+                # Reject duplicate record_ids to prevent workload
+                # amplification (caller submits [1]*500 and we'd dispatch
+                # the work 500x against a single record). Order is
+                # preserved deterministically for callers that depend on
+                # it via dict insertion semantics.
+                unique_ids: list[int] = []
+                seen: set[int] = set()
                 for rid in record_ids:
                     if isinstance(rid, bool) or not isinstance(rid, int) or rid <= 0:
                         return {
                             "error": "record_ids must contain only positive integers"
                         }
-                call_args.append(record_ids)
+                    if rid not in seen:
+                        seen.add(rid)
+                        unique_ids.append(rid)
+                call_args.append(unique_ids)
             if args:
                 call_args.extend(args)
 
             if dry_run:
-                return {
+                # Echo the sanitised kwargs (post-context-filter) so the
+                # caller can see exactly what would have been dispatched.
+                # ``stripped_context_keys`` is a hint that their context
+                # contained bypass primitives the gateway refused to
+                # forward — silently dropping these in real mode would
+                # otherwise be invisible to the caller.
+                dry_run_response: dict[str, Any] = {
                     "dry_run": True,
                     "model": model,
                     "method": method,
-                    "record_ids": record_ids,
+                    "record_ids": call_args[0] if record_ids is not None else None,
                     "args_count": len(call_args),
+                    "sanitized_kwargs": sanitized_kwargs,
                 }
+                if stripped_context_keys:
+                    dry_run_response["stripped_context_keys"] = stripped_context_keys
+                return dry_run_response
 
             result = await client.execute_kw(
                 model,
                 method,
                 call_args,
-                kwargs or {},
+                sanitized_kwargs,
             )
 
             return {"result": result, "model": model, "method": method}

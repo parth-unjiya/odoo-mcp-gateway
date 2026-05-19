@@ -43,3 +43,9 @@ class FieldInfo:
     selection: list[tuple[str, str]] = field(default_factory=list)
     help_text: str = ""
     is_binary: bool = False
+    # Older field names that map to this one in earlier Odoo versions,
+    # surfaced so ``get_model_fields`` can hint at backward-compatible
+    # spellings (e.g. ``tax_id`` is an alias for v19's ``tax_ids`` on
+    # ``sale.order.line``).  Populated by the field inspector when a
+    # version adapter is available; empty otherwise.
+    field_aliases: list[str] = field(default_factory=list)

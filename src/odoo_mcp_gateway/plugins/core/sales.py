@@ -15,9 +15,12 @@ from odoo_mcp_gateway.plugins.core.helpers import (
     get_auth_info,
     get_client,
     get_uid,
+    get_valid_states,
     next_month,
 )
 
+# Fallback set. Prefer the live ``get_valid_states`` probe so we track
+# Odoo upstream renames (e.g. v19 added/removed selection values).
 _VALID_SALE_STATES = frozenset({"draft", "sent", "sale", "done", "cancel"})
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -69,8 +72,11 @@ class SalesPlugin(OdooPlugin):
             if gate_error:
                 return {"error": gate_error}
 
-            if state and state not in _VALID_SALE_STATES:
-                return {"error": f"Invalid state: {state!r}"}
+            if state:
+                live_states = await get_valid_states(client, "sale.order")
+                valid = live_states or _VALID_SALE_STATES
+                if state not in valid:
+                    return {"error": f"Invalid state: {state!r}"}
 
             uid = get_uid(context)
             if uid == 0:

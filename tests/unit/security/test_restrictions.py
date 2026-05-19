@@ -29,7 +29,10 @@ def model_access_config() -> ModelAccessConfig:
         stock_models={
             "full_crud": ["res.partner", "sale.order", "crm.lead"],
             "read_only": ["res.currency", "uom.uom"],
-            "admin_only": ["ir.model"],
+            # Use res.lang to represent the model_access admin_only
+            # category. (ir.model used to live here but was promoted to
+            # the hardcoded always-blocked list.)
+            "admin_only": ["res.lang"],
         },
         custom_models={
             "full_crud": ["x_custom.model"],
@@ -227,15 +230,33 @@ class TestModelAccessAdminOnly:
     def test_admin_only_in_model_access_blocks_non_admin(
         self, checker: RestrictionChecker
     ) -> None:
-        msg = checker.check_model_access("ir.model", "read", False)
+        msg = checker.check_model_access("res.lang", "read", False)
         assert msg is not None
         assert "administrator access" in msg
 
     def test_admin_only_in_model_access_allows_admin(
         self, checker: RestrictionChecker
     ) -> None:
-        msg = checker.check_model_access("ir.model", "read", True)
+        msg = checker.check_model_access("res.lang", "read", True)
         assert msg is None
+
+    def test_ir_model_always_blocked(self, checker: RestrictionChecker) -> None:
+        """ir.model is hardcoded always-blocked — even admins can't go
+        through the generic CRUD path. The dedicated ``list_models`` tool
+        is the supported way to enumerate models.
+        """
+        msg = checker.check_model_access("ir.model", "read", True)
+        assert msg is not None
+        assert "always blocked" in msg
+
+    def test_ir_model_fields_always_blocked(self, checker: RestrictionChecker) -> None:
+        """ir.model.fields is hardcoded always-blocked — use the
+        ``get_model_fields`` tool, which goes through the field inspector
+        cache instead of the metamodel.
+        """
+        msg = checker.check_model_access("ir.model.fields", "read", True)
+        assert msg is not None
+        assert "always blocked" in msg
 
 
 # ── check_method_access ────────────────────────────────────────────
@@ -411,12 +432,17 @@ class TestGetAccessibleModels:
         self, checker: RestrictionChecker
     ) -> None:
         models = checker.get_accessible_models(False)
+        # res.lang represents the model_access admin_only category here.
+        assert "res.lang" not in models
+        # ir.model is hardcoded always-blocked, never visible to anyone.
         assert "ir.model" not in models
 
     def test_admin_sees_admin_only(self, checker: RestrictionChecker) -> None:
         models = checker.get_accessible_models(True)
-        assert "ir.model" in models
+        assert "res.lang" in models
         assert "res.groups" in models
+        # ir.model stays blocked even for admins.
+        assert "ir.model" not in models
 
     def test_always_blocked_never_in_list(self, checker: RestrictionChecker) -> None:
         models = checker.get_accessible_models(True)

@@ -68,14 +68,34 @@ def get_workflow() -> WorkflowDef:
                 name="purchase",
                 label="Purchase Order",
                 transitions=(
+                    # button_done is the canonical lock method on Odoo
+                    # 17 and 18 (early v18 builds still ship it). It was
+                    # removed on Odoo 19+ in favour of writing the
+                    # locked flag — the write:locked transition below
+                    # is advertised on v19+ and is fulfilled by the
+                    # update_record tool, not execute_method.
                     TransitionDef(
                         action="button_done",
                         target_state="done",
                         label="Lock",
                         description=(
                             "Locks the purchase order, preventing "
-                            "further modifications."
+                            "further modifications. Available on Odoo "
+                            "17 and 18. Removed on Odoo 19+."
                         ),
+                        max_version=18,
+                    ),
+                    TransitionDef(
+                        action="write:locked",
+                        target_state="done",
+                        label="Lock",
+                        description=(
+                            "Lock the purchase order by writing "
+                            "{'locked': True} via update_record. "
+                            "This is the Odoo 19+ path — the legacy "
+                            "button_done method was removed."
+                        ),
+                        min_version=19,
                     ),
                     TransitionDef(
                         action="button_cancel",
@@ -132,5 +152,19 @@ def get_workflow() -> WorkflowDef:
                 "and price_unit. Then call button_confirm to confirm."
             ),
         ),
-        version_notes={},
+        version_notes={
+            "v17": (
+                "'button_done' is the canonical way to lock a confirmed purchase order."
+            ),
+            "v18": (
+                "'button_done' still works but is deprecated. The modern "
+                "equivalent is write({'locked': True}). Either approach "
+                "moves the order to the locked/done state."
+            ),
+            "v19": (
+                "'button_done' may be removed. If execute_method on "
+                "'button_done' raises a 'method not found' error, fall "
+                "back to update_record with {'locked': True}."
+            ),
+        },
     )

@@ -65,6 +65,68 @@ _TOOL_OPERATION_MAP: dict[str, str] = {
 _VALID_OPERATIONS = frozenset({"read", "write", "create", "delete", "auth"})
 
 
+# Odoo context keys that can bypass security controls or audit trails.
+# These MUST be stripped from any caller-supplied ``context`` kwarg that
+# reaches Odoo via execute_kw. Each entry has a real-world bypass
+# primitive associated:
+#
+#   active_test           - return archived (active=False) records
+#   tracking_disable      - skip chatter / audit trail writes
+#   mail_create_nolog     - skip create-time mail.message logging
+#   mail_create_nosubscribe - skip auto-follower subscription
+#   mail_notrack          - skip field-change tracking
+#   force_company         - cross-company write
+#   allowed_company_ids   - cross-company read
+#   default_company_id    - cross-company create
+#   no_reset_password     - silently disable password-reset email
+#   import_compat         - relax type coercion / validation
+#   check_move_validity   - skip accounting move validation
+#
+# Lifted from tools/crud.py so every tool that takes a ``context``
+# kwarg (today only execute_method, but new plugin tools must use this
+# helper) shares one canonical filter rather than re-declaring its own.
+DANGEROUS_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "active_test",
+        "tracking_disable",
+        "mail_create_nolog",
+        "mail_create_nosubscribe",
+        "mail_notrack",
+        "force_company",
+        "allowed_company_ids",
+        "default_company_id",
+        "no_reset_password",
+        "import_compat",
+        "check_move_validity",
+    }
+)
+
+
+def filter_dangerous_context_keys(
+    context: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Return *(sanitised_context, stripped_keys)* for a caller-supplied context.
+
+    The first element is a NEW dict suitable to pass to Odoo via
+    ``execute_kw`` — the input is not mutated. The second element is
+    the list of keys that were removed, so callers can echo them in
+    dry-run previews or audit logs ("here's what we would have done").
+
+    ``None`` or non-dict inputs are coerced to an empty context; this
+    keeps the call site one-liner-friendly.
+    """
+    if not isinstance(context, dict):
+        return {}, []
+    stripped: list[str] = []
+    safe: dict[str, Any] = {}
+    for k, v in context.items():
+        if k in DANGEROUS_CONTEXT_KEYS:
+            stripped.append(k)
+        else:
+            safe[k] = v
+    return safe, stripped
+
+
 def register_tool_operation(tool_name: str, operation: str) -> None:
     """Register a single tool's operation type.
 

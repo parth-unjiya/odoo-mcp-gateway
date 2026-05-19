@@ -59,13 +59,60 @@ def _make_manager(
     else:
         xml_client.authenticate = AsyncMock(return_value=xmlrpc_auth)
 
-    # execute_kw is used for group fetching and has_group checks
+    # execute_kw is used for group fetching, get_external_id, and
+    # has_group checks. v0.2.2-final routes the group-membership read
+    # through ``res.users.read`` (groups_id / group_ids depending on
+    # Odoo version) — we synthesize that response from
+    # ``execute_kw_result`` (the legacy "list of group records") so
+    # existing tests don't need a full RPC scenario.
     if isinstance(execute_kw_result, Exception):
         json_client.execute_kw = AsyncMock(side_effect=execute_kw_result)
         xml_client.execute_kw = AsyncMock(side_effect=execute_kw_result)
     else:
-        json_client.execute_kw = AsyncMock(return_value=execute_kw_result or [])
-        xml_client.execute_kw = AsyncMock(return_value=execute_kw_result or [])
+        legacy_groups = execute_kw_result or []
+        # Synthesize group_ids from the records if the tests passed a
+        # full-records list. Otherwise default to a single placeholder
+        # group id so the second-step read of res.groups uses ITS keys.
+        legacy_group_ids = (
+            list(range(1, len(legacy_groups) + 1)) if legacy_groups else []
+        )
+
+        async def _route_execute_kw(
+            model: str, method: str, args: list, kwargs: dict | None = None
+        ) -> Any:
+            # res.users.read for the membership field. The probe now
+            # tries (all_group_ids → groups_id → group_ids); the legacy
+            # simple-form helper returns the requested set on the v17/
+            # v18 canonical name and signals "invalid field" for
+            # ``all_group_ids`` (a v19-only field) so the production
+            # code falls back as it would against a real v17/v18
+            # server.
+            if model == "res.users" and method == "read":
+                requested_fields = args[1] if len(args) >= 2 else []
+                if "all_group_ids" in requested_fields:
+                    raise RuntimeError("Invalid field res.users.all_group_ids")
+                if "groups_id" in requested_fields:
+                    return [{"id": args[0][0], "groups_id": legacy_group_ids}]
+                if "group_ids" in requested_fields:
+                    return [{"id": args[0][0], "group_ids": legacy_group_ids}]
+                return [{"id": args[0][0]}]
+            # res.groups.read returning the display names supplied by
+            # the test.
+            if model == "res.groups" and method == "read":
+                return legacy_groups
+            # has_group calls: tests should override via _call_has_group
+            # mocking. Default to False so admin status stays consistent.
+            if model == "res.users" and method == "has_group":
+                return False
+            # res.groups.get_external_id — empty mapping by default so
+            # tests using the simple-form helper don't accidentally
+            # inject XML IDs that they didn't intend.
+            if model == "res.groups" and method == "get_external_id":
+                return {gid: "" for gid in args[0]}
+            return legacy_groups
+
+        json_client.execute_kw = AsyncMock(side_effect=_route_execute_kw)
+        xml_client.execute_kw = AsyncMock(side_effect=_route_execute_kw)
 
     # For session strategy
     if isinstance(session_info, Exception):
@@ -659,3 +706,246 @@ class TestAdminDetectionViaXmlId:
 
         # Should not raise, admin stays False (fail-closed).
         assert auth.is_admin is False
+
+    async def test_odoo17_fallback_when_recordset_form_fails(self) -> None:
+        """Regression test for v0.2.2 cross-version compat.
+
+        Odoo 17's ``has_group`` does NOT accept a recordset arg — it raises
+        "Users.has_group() takes 2 positional arguments but 3 were given".
+        The gateway must fall back to the Odoo 17 form ``[xmlid]`` (no uid).
+
+        This test simulates the Odoo 17 error on the first call and asserts
+        a second call is made with the fallback form, and that the result
+        is correctly recognized.
+        """
+        result = _auth_result(uid=2, is_admin=False)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        # Odoo 17 raises TypeError-like error on the recordset form,
+        # then returns True for the no-recordset form.
+        recordset_error = RuntimeError(
+            "Users.has_group() takes 2 positional arguments but 3 were given"
+        )
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                recordset_error,  # xmlid detect — try recordset form (Odoo 18)
+                True,  # xmlid detect — fallback no-recordset form (Odoo 17) succeeds
+                recordset_error,  # verify — try recordset form
+                True,  # verify — fallback succeeds
+            ]
+        )
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "admin", "pass", "testdb")
+
+        # Admin status should be correctly detected via fallback
+        assert auth.is_admin is True
+
+        # Verify the fallback call was made with just [xmlid]
+        # The last execute_kw is the verify call's fallback
+        last_call = json_client.execute_kw.call_args_list[-1].args
+        assert last_call[0] == "res.users"
+        assert last_call[1] == "has_group"
+        # Fallback form: just [xmlid], no uid recordset
+        assert last_call[2] == ["base.group_system"]
+
+    async def test_both_call_forms_fail_demotes_admin(self) -> None:
+        """Fail-closed: if both Odoo 17 and 18 call forms fail, admin demoted."""
+        result = _auth_result(uid=2, is_admin=False)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                # xmlid detect: both forms fail for base.group_system
+                RuntimeError("network"),  # recordset form
+                RuntimeError("network"),  # no-recordset form
+                # xmlid detect: both forms fail for base.group_erp_manager
+                RuntimeError("network"),  # recordset form
+                RuntimeError("network"),  # no-recordset form
+                # verify: both forms fail
+                RuntimeError("network"),  # recordset form
+                RuntimeError("network"),  # no-recordset form
+            ]
+        )
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "user", "pass", "testdb")
+
+        # Should not raise. Admin stays False (fail-closed).
+        assert auth.is_admin is False
+
+    async def test_verify_admin_via_has_group_passes_uid_recordset(self) -> None:
+        """Regression test for v0.2.1 → v0.2.2 admin-demotion bug.
+
+        ``has_group`` is an Odoo recordset method — it MUST be called with
+        the user's UID as a recordset (``[[uid], group_xml_id]``), not just
+        the group XML id. On Odoo 18+ the no-recordset form returns False
+        unconditionally, demoting real admins to non-admin and (combined
+        with ``default_policy=deny``) blocking every model access.
+
+        This test verifies the call payload includes the uid recordset.
+        """
+        result = _auth_result(uid=42, is_admin=False)
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+        json_client.execute_kw = AsyncMock(
+            side_effect=[
+                [],  # groups search_read
+                True,  # _detect_admin_via_xmlid → has_group system
+                True,  # _verify_admin_via_has_group → has_group system
+            ]
+        )
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        await mgr.login("password", "admin", "pass", "testdb")
+
+        # Inspect the FINAL has_group call (the verify-override one).
+        # It MUST pass [[42], "base.group_system"] — NOT just
+        # ["base.group_system"].
+        final_call_args = json_client.execute_kw.call_args_list[-1].args
+        # args = (model, method, args_list, kwargs_dict?)
+        assert final_call_args[0] == "res.users"
+        assert final_call_args[1] == "has_group"
+        # The third positional must be [[uid], group_xml_id]
+        positional_args = final_call_args[2]
+        assert positional_args[0] == [42], (
+            f"has_group must receive uid recordset [[42]] as first arg, "
+            f"got {positional_args[0]!r}. This was the v0.2.1 bug that "
+            f"demoted real admins on Odoo 18 to non-admin."
+        )
+        assert positional_args[1] == "base.group_system"
+
+
+class TestGroupXmlIds:
+    """v0.2.2 S2: ``_fetch_groups`` populates both display names AND XML IDs.
+
+    Previously RBAC matched ``user_groups`` (display names) against
+    rbac.yaml's technical IDs (``base.group_system``) — never aligned,
+    over-blocking non-admins. After the fix, ``result.groups`` contains
+    the UNION so either form matches.
+    """
+
+    async def test_groups_includes_both_display_and_xml_ids(self) -> None:
+        result = _auth_result(uid=5, groups=[])
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        # v0.2.2-final flow:
+        #   1. res.users.read([uid], ['groups_id']) → returns group_ids
+        #      (or 'group_ids' on Odoo 19+ via Invalid-field retry).
+        #   2. res.groups.read([gids], ['full_name','name']) → display names
+        #   3. res.groups.get_external_id([gids]) → {gid: 'module.name'}
+        #   4. has_group probes for admin detection + verification
+        async def _route(model: str, method: str, args: list, kw=None) -> Any:
+            if model == "res.users" and method == "read":
+                requested = args[1] if len(args) >= 2 else []
+                if "all_group_ids" in requested:
+                    raise RuntimeError("Invalid field res.users.all_group_ids")
+                if "groups_id" in requested:
+                    return [{"id": 5, "groups_id": [1, 4]}]
+                return [{"id": 5}]
+            if model == "res.groups" and method == "read":
+                return [
+                    {"id": 1, "full_name": "User types / Internal User"},
+                    {"id": 4, "full_name": "Sales / User: All Documents"},
+                ]
+            if model == "res.groups" and method == "get_external_id":
+                return {1: "base.group_user", 4: "sales_team.group_sale_salesman"}
+            if model == "res.users" and method == "has_group":
+                return False
+            return []
+
+        json_client.execute_kw = AsyncMock(side_effect=_route)
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "user", "pass", "testdb")
+
+        # Both forms must be in result.groups so rbac.yaml configs using
+        # EITHER display names or XML IDs work.
+        assert "User types / Internal User" in auth.groups
+        assert "Sales / User: All Documents" in auth.groups
+        assert "base.group_user" in auth.groups
+        assert "sales_team.group_sale_salesman" in auth.groups
+
+        # group_xml_ids contains ONLY the technical form
+        assert "base.group_user" in auth.group_xml_ids
+        assert "sales_team.group_sale_salesman" in auth.group_xml_ids
+        assert "User types / Internal User" not in auth.group_xml_ids
+
+    async def test_xml_id_fetch_failure_does_not_break_login(self) -> None:
+        """If get_external_id AND ir.model.data both fail, display names still work."""
+        result = _auth_result(uid=5, groups=[])
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        async def _route(model: str, method: str, args: list, kw=None) -> Any:
+            if model == "res.users" and method == "read":
+                requested = args[1] if len(args) >= 2 else []
+                if "all_group_ids" in requested:
+                    raise RuntimeError("Invalid field res.users.all_group_ids")
+                if "groups_id" in requested:
+                    return [{"id": 5, "groups_id": [1]}]
+                return [{"id": 5}]
+            if model == "res.groups" and method == "read":
+                return [{"id": 1, "full_name": "Internal User"}]
+            if model == "res.groups" and method == "get_external_id":
+                raise RuntimeError("method not available")
+            if model == "ir.model.data" and method == "search_read":
+                raise RuntimeError("no model access")
+            if model == "res.users" and method == "has_group":
+                return False
+            return []
+
+        json_client.execute_kw = AsyncMock(side_effect=_route)
+
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "user", "pass", "testdb")
+
+        # Display names still present
+        assert "Internal User" in auth.groups
+        # XML IDs is empty but that's OK — login still succeeded
+        assert auth.group_xml_ids == []
+
+    async def test_odoo_19_field_rename_falls_back(self) -> None:
+        """Odoo 19+: ``groups_id`` was renamed to ``group_ids`` — must fall back."""
+        result = _auth_result(uid=5, groups=[])
+        json_client = AsyncMock(spec=JsonRpcClient)
+        xml_client = AsyncMock(spec=XmlRpcClient)
+        json_client.authenticate = AsyncMock(return_value=result)
+
+        async def _route(model: str, method: str, args: list, kw=None) -> Any:
+            if model == "res.users" and method == "read":
+                fields = args[1] if len(args) >= 2 else []
+                # v19 prefers all_group_ids (with implications)
+                if "all_group_ids" in fields:
+                    return [{"id": 5, "all_group_ids": [1]}]
+                if "groups_id" in fields:
+                    # v19 rejects this field name.
+                    raise RuntimeError("Invalid field res.users.groups_id")
+                if "group_ids" in fields:
+                    return [{"id": 5, "group_ids": [1]}]
+            if model == "res.groups" and method == "read":
+                return [{"id": 1, "full_name": "Internal User"}]
+            if model == "res.groups" and method == "get_external_id":
+                return {1: "base.group_user"}
+            if model == "res.users" and method == "has_group":
+                return False
+            return []
+
+        json_client.execute_kw = AsyncMock(side_effect=_route)
+        mgr = AuthManager(jsonrpc_client=json_client, xmlrpc_client=xml_client)
+        auth = await mgr.login("password", "user", "pass", "testdb")
+
+        # The fallback path picked up the v19 field name and still
+        # resolved the user's groups.
+        assert "base.group_user" in auth.group_xml_ids
+        assert "Internal User" in auth.groups

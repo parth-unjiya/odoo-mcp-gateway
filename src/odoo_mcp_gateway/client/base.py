@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hmac
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -43,7 +44,13 @@ class Credential:
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Credential):
-            return self._value == other._value
+            # Constant-time comparison: even though no live code path
+            # uses ``Credential == ...`` to gate access today, a future
+            # consumer could — and equality of secrets must not leak
+            # length or prefix via early-exit timing.
+            a = self._value if self._value is not None else ""
+            b = other._value if other._value is not None else ""
+            return hmac.compare_digest(a, b)
         return NotImplemented
 
     def __hash__(self) -> int:
@@ -55,7 +62,19 @@ class Credential:
 
 @dataclass
 class AuthResult:
-    """Stores the result of an Odoo authentication call."""
+    """Stores the result of an Odoo authentication call.
+
+    Two parallel collections are maintained for the user's groups:
+
+    * ``groups`` — locale-dependent display names such as
+      ``"Administration / Settings"``. Suitable for UI display.
+    * ``group_xml_ids`` — technical XML identifiers such as
+      ``"base.group_system"``. Suitable for RBAC matching since they
+      are stable across Odoo versions and translations.
+
+    RBAC checks should prefer XML IDs; ``groups`` is kept for backward
+    compatibility and human-readable presentation.
+    """
 
     uid: int
     session_id: str | None
@@ -64,6 +83,7 @@ class AuthResult:
     groups: list[str]
     username: str
     database: str
+    group_xml_ids: list[str] = field(default_factory=list)
 
 
 class OdooClientBase(ABC):

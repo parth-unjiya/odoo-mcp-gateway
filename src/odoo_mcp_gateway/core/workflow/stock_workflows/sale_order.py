@@ -67,13 +67,30 @@ def get_workflow() -> WorkflowDef:
                 name="sale",
                 label="Sales Order",
                 transitions=(
+                    # action_lock is the v18+/v19 method name; action_done
+                    # is the v17-only legacy alias. Version constraints make
+                    # _filter_transitions emit only the one that matches the
+                    # detected Odoo version, so callers never see a method
+                    # that will raise AttributeError on their server.
                     TransitionDef(
-                        action="action_done",
+                        action="action_lock",
                         target_state="done",
                         label="Lock",
                         description=(
-                            "Locks the sales order, preventing further modifications."
+                            "Locks the sales order, preventing further "
+                            "modifications. Available on Odoo 18 and 19."
                         ),
+                        min_version=18,
+                    ),
+                    TransitionDef(
+                        action="action_done",
+                        target_state="done",
+                        label="Lock (v17)",
+                        description=(
+                            "Locks the sales order on Odoo 17. On Odoo "
+                            "18+ the method was renamed to action_lock."
+                        ),
+                        max_version=17,
                     ),
                     TransitionDef(
                         action="action_cancel",
@@ -132,9 +149,20 @@ def get_workflow() -> WorkflowDef:
             ),
         ),
         version_notes={
+            "17": (
+                "On Odoo 17, lock the sales order with action_done. The "
+                "v18+ alias action_lock does not exist on v17."
+            ),
+            "18": (
+                "On Odoo 18+, the lock method was renamed to action_lock. "
+                "action_done still exists as a backwards-compatible alias "
+                "on early v18 builds but should be considered deprecated."
+            ),
             "19": (
-                "In Odoo 19, sale.order.line field 'tax_id' was renamed to "
-                "'tax_ids', and 'product_uom' was renamed to 'product_uom_id'."
+                "On Odoo 19, use action_lock to lock the order — "
+                "action_done was removed. The sale.order.line field "
+                "'tax_id' was also renamed to 'tax_ids', and "
+                "'product_uom' was renamed to 'product_uom_id'."
             ),
         },
     )

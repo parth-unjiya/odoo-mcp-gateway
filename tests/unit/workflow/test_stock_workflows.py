@@ -92,6 +92,10 @@ class TestSaleOrderWorkflow:
         wf = get_sale_order_workflow()
         sale = wf.states["sale"]
         actions = [t.action for t in sale.transitions]
+        # Both the v18+/v19 method (action_lock) and the v17 legacy
+        # alias (action_done) must be advertised so callers on any
+        # supported Odoo version get a working method.
+        assert "action_lock" in actions
         assert "action_done" in actions
         assert "action_cancel" in actions
 
@@ -420,3 +424,42 @@ class TestAllWorkflowIntegrity:
                     assert t.target_state, (
                         f"{wf.model}.{state_def.name}->{t.action} has no target_state"
                     )
+
+
+class TestHelpdeskTicketUsesWriteTransitions:
+    """v0.2.2 gap fix: helpdesk.ticket workflow uses write:stage_id
+    transitions instead of synthetic 'assign_ticket', 'resolve_ticket',
+    etc. method names that don't exist in Odoo.
+    """
+
+    def test_no_synthetic_method_names_in_helpdesk_workflow(self) -> None:
+        from odoo_mcp_gateway.core.workflow.stock_workflows.helpdesk_ticket import (
+            get_workflow,
+        )
+
+        wf = get_workflow()
+        synthetic_names = {
+            "assign_ticket",
+            "resolve_ticket",
+            "close_ticket",
+            "reopen_ticket",
+        }
+        for state_def in wf.states.values():
+            for transition in state_def.transitions:
+                assert transition.action not in synthetic_names, (
+                    f"helpdesk workflow advertises synthetic method "
+                    f"'{transition.action}' which doesn't exist in Odoo. "
+                    "Use 'write:stage_id' instead."
+                )
+
+    def test_all_helpdesk_transitions_are_write_field(self) -> None:
+        from odoo_mcp_gateway.core.workflow.stock_workflows.helpdesk_ticket import (
+            get_workflow,
+        )
+
+        wf = get_workflow()
+        for state_def in wf.states.values():
+            for transition in state_def.transitions:
+                assert transition.action.startswith("write:"), (
+                    f"Expected write:field transition, got action={transition.action!r}"
+                )

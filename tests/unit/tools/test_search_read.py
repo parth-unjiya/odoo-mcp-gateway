@@ -103,15 +103,34 @@ class TestSearchReadBasic:
         call_kwargs = mock_client.execute_kw.call_args[0][3]
         assert call_kwargs["limit"] == 500
 
-    async def test_limit_clamping_negative(self) -> None:
+    async def test_limit_negative_rejected(self) -> None:
+        """Negative limits are rejected explicitly — previously clamped to 1
+        which silently turned "no limit" into "give me one row".
+        """
         mock_client = make_mock_client(execute_kw_return=[])
         gateway = make_gateway(mock_client=mock_client)
 
         fn = _get_tool(gateway)
-        await fn(model="res.partner", fields=["name"], limit=-5)
+        resp = await fn(model="res.partner", fields=["name"], limit=-5)
 
-        call_kwargs = mock_client.execute_kw.call_args[0][3]
-        assert call_kwargs["limit"] == 1
+        assert "error" in resp
+        assert "positive integer" in resp["error"]
+        mock_client.execute_kw.assert_not_called()
+
+    async def test_limit_zero_rejected(self) -> None:
+        """``limit=0`` is rejected. Without this guard, max(1, min(0, 500))
+        silently clamped to 1, returning one row when the caller asked for
+        zero.
+        """
+        mock_client = make_mock_client(execute_kw_return=[])
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(model="res.partner", fields=["name"], limit=0)
+
+        assert "error" in resp
+        assert "positive integer" in resp["error"]
+        mock_client.execute_kw.assert_not_called()
 
     async def test_with_order(self) -> None:
         mock_client = make_mock_client(execute_kw_return=[])

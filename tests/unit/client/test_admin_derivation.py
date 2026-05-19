@@ -48,11 +48,34 @@ def _make_manager(
     xml_client.authenticate = AsyncMock(return_value=auth_result)
 
     groups = execute_kw_result if execute_kw_result is not None else []
+    legacy_group_ids = list(range(1, len(groups) + 1)) if groups else []
 
     async def _dispatch(model: str, method: str, *args: Any, **kwargs: Any) -> Any:
+        # Test signature: side_effect=callable gets (model, method,
+        # call_args_list[, call_kwargs_dict]) so args[0] is the inner
+        # positional list and args[0][0]/args[0][1] are its members.
+        inner = args[0] if args else []
+        # has_group: admin probes
         if method == "has_group":
             return has_group_result
-        # Default: groups search_read
+        # res.users.read for the user's membership field
+        if model == "res.users" and method == "read":
+            requested = inner[1] if len(inner) >= 2 else []
+            uid_list = inner[0] if inner else []
+            uid_val = uid_list[0] if isinstance(uid_list, list) and uid_list else 1
+            if "all_group_ids" in requested:
+                raise RuntimeError("Invalid field res.users.all_group_ids")
+            if "groups_id" in requested:
+                return [{"id": uid_val, "groups_id": legacy_group_ids}]
+            return [{"id": uid_val}]
+        # res.groups.read returns the display names
+        if model == "res.groups" and method == "read":
+            return groups
+        # XML ID lookup: no XML IDs in the legacy simple-form helper.
+        if model == "res.groups" and method == "get_external_id":
+            gids = inner[0] if inner else []
+            return {gid: "" for gid in gids}
+        # Default fallback (legacy simple-form: return the groups list).
         return groups
 
     json_client.execute_kw = AsyncMock(side_effect=_dispatch)

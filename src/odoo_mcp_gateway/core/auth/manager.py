@@ -191,7 +191,8 @@ class AuthManager:
         # is executed as the authenticated user against Odoo, so a
         # tampered auth payload cannot flip the bit.
         verified_is_admin = await self._verify_admin_via_has_group(
-            self._get_active_client_unchecked()
+            self._get_active_client_unchecked(),
+            result.uid,
         )
         result.is_admin = verified_is_admin
         self._auth_result = result
@@ -250,39 +251,259 @@ class AuthManager:
     # ------------------------------------------------------------------
 
     async def _fetch_groups(self, result: AuthResult) -> AuthResult:
-        """Enrich *result* with the user's group display names.
+        """Enrich *result* with the user's groups — display names AND XML IDs.
 
-        Group names are used for RBAC matching. Also derives is_admin from
-        group names as a fallback (used when ``has_group()`` is unavailable).
-        The primary admin detection via XML IDs happens in
-        :meth:`_detect_admin_via_xmlid`.
+        Two parallel lists are populated:
+
+        * ``result.groups`` — UNION of display names AND XML IDs. RBAC
+          configs may use either form; both resolve the same way.
+        * ``result.group_xml_ids`` — technical XML IDs like
+          ``"base.group_system"``. For RBAC matching by callers that
+          specifically want the technical (version-stable) form.
+
+        XML IDs are fetched via ``res.groups.get_external_id()`` rather
+        than ``ir.model.data.search_read``. The former uses ``sudo()``
+        internally (see Odoo's ``BaseModel._get_external_ids``) and is
+        therefore callable by ANY authenticated user. The latter requires
+        ``base.group_erp_manager`` and silently failed for non-admin
+        users, leaving ``group_xml_ids = []`` and breaking any RBAC
+        config keyed on technical IDs.
+
+        Three fallback layers are attempted so a transient Odoo glitch
+        on any single API doesn't strand the user without XML IDs:
+
+          1. ``res.groups.get_external_id([group_ids])`` — preferred,
+             works for any user.
+          2. ``ir.model.data.search_read`` — legacy path, kept as a
+             safety net for admin sessions or non-standard Odoo forks.
+          3. Empty list — last resort; gateway still works against
+             display-name configs.
+
+        Admin detection is NOT performed here — see
+        :meth:`_detect_admin_via_xmlid` and
+        :meth:`_verify_admin_via_has_group`.
         """
         client = self._get_active_client_unchecked()
         try:
+            # Resolve the user's group memberships by reading the user
+            # record directly, NOT by searching ``res.groups`` for the
+            # user. The latter pattern broke on Odoo 19 because the
+            # ``res.groups.users`` field was renamed to ``user_ids``
+            # there, and a domain referencing the old field raised
+            # "Invalid field res.groups.users". Reading
+            # ``res.users.groups_id`` (v17/v18) or ``res.users.group_ids``
+            # (v19+) sidesteps the rename entirely AND avoids the ACL
+            # corner cases of searching ``res.groups`` as a non-admin.
+            group_ids = await self._read_user_group_ids(client, result.uid)
+            if not group_ids:
+                return result
+            # Now read the group records by ID. ``full_name`` is stable
+            # across 17/18/19, but tolerate its absence on a fork that
+            # may have dropped the helper.
             groups_data: Any = await client.execute_kw(
                 "res.groups",
-                "search_read",
-                [[["users", "in", [result.uid]]]],
-                {"fields": ["full_name"]},
+                "read",
+                [group_ids, ["full_name", "name"]],
             )
-            if isinstance(groups_data, list):
-                result.groups = [
-                    str(g.get("full_name", ""))
-                    for g in groups_data
-                    if isinstance(g, dict)
-                ]
-            # Derive is_admin from group membership as a fallback.
-            # _detect_admin_via_xmlid runs after this for a more
-            # reliable locale-independent check.
-            if not result.is_admin:
-                admin_indicators = {
-                    "base.group_system",
-                    "base.group_erp_manager",
-                }
-                result.is_admin = bool(admin_indicators & set(result.groups))
+            if not isinstance(groups_data, list):
+                return result
+            display_names = [
+                str(g.get("full_name") or g.get("name") or "")
+                for g in groups_data
+                if isinstance(g, dict)
+            ]
+            xml_ids = await self._fetch_group_xml_ids(client, group_ids)
+            # ``groups`` is the UNION of display names + XML IDs. This
+            # makes RBAC matching work whether rbac.yaml uses technical
+            # XML IDs (``base.group_user``) or display names
+            # (``"User types / Internal User"``) — both forms resolve
+            # the same way. ``group_xml_ids`` is also kept separate
+            # for callers that specifically want the technical form.
+            result.groups = display_names + xml_ids
+            result.group_xml_ids = xml_ids
         except Exception:
             logger.warning("Could not fetch user groups", exc_info=True)
         return result
+
+    async def _read_user_group_ids(
+        self,
+        client: OdooClientBase,
+        uid: int,
+    ) -> list[int]:
+        """Return the user's effective group IDs across all Odoo versions.
+
+        Odoo renamed the many2many between ``res.users`` and ``res.groups``
+        when introducing the ``_id``-suffix convention:
+
+          * Odoo 17 / 18: ``res.users.groups_id`` (resolved-with-implications)
+          * Odoo 19+   : ``res.users.group_ids`` (DIRECT memberships only)
+                         plus ``res.users.all_group_ids`` (with implications)
+
+        RBAC matching MUST see the full implied set — a user who has
+        ``sales_team.group_sale_manager`` implicitly belongs to
+        ``base.group_user``, and config keyed on the latter must match.
+        So on Odoo 19+ we prefer ``all_group_ids``; on Odoo 17/18 we
+        use ``groups_id`` (which is already implication-resolved at the
+        ORM level).
+
+        Candidates are tried in order: ``all_group_ids`` (v19+, best
+        signal), then ``groups_id`` (v17/v18 canonical), then
+        ``group_ids`` (v19 direct-only fallback). Each candidate is
+        skipped on "invalid field" errors; any other error re-raises
+        so the outer ``_fetch_groups`` try/except still gates failure.
+
+        Reading ``res.users`` for one's own ``uid`` works for ANY
+        authenticated user (Odoo's ACLs allow self-read).
+        """
+        for field_name in ("all_group_ids", "groups_id", "group_ids"):
+            try:
+                user_rec = await client.execute_kw(
+                    "res.users",
+                    "read",
+                    [[uid], [field_name]],
+                )
+            except Exception as exc:
+                # If this looks like an "invalid field" error, try the
+                # next candidate; otherwise re-raise so the outer
+                # _fetch_groups catch-all handles it the same way it
+                # would have without this helper.
+                msg = str(exc).lower()
+                if "invalid field" in msg or "no such field" in msg:
+                    logger.debug(
+                        "res.users.%s not present, trying alternate name",
+                        field_name,
+                    )
+                    continue
+                raise
+            if isinstance(user_rec, list) and user_rec:
+                rec = user_rec[0]
+                if isinstance(rec, dict) and field_name in rec:
+                    raw = rec[field_name]
+                    if isinstance(raw, list):
+                        return [int(g) for g in raw if isinstance(g, int)]
+            # Field name accepted but the record didn't carry the
+            # field — break out so we don't keep probing
+            return []
+        return []
+
+    async def _fetch_group_xml_ids(
+        self,
+        client: OdooClientBase,
+        group_ids: list[int],
+    ) -> list[str]:
+        """Return XML IDs for the given group records.
+
+        Uses ``get_external_id`` (sudo'd, works for any user) with a
+        legacy ``ir.model.data`` fallback for non-standard Odoo forks
+        that may have shadowed the helper. Returns ``[]`` if both APIs
+        fail — caller continues with display-name-only RBAC.
+        """
+        if not group_ids:
+            return []
+
+        # Preferred path: get_external_id is defined on every BaseModel
+        # and calls ir.model.data through sudo() internally — works for
+        # any authenticated user regardless of ACLs on ir.model.data.
+        try:
+            external_ids: Any = await client.execute_kw(
+                "res.groups",
+                "get_external_id",
+                [group_ids],
+            )
+        except Exception:
+            logger.debug(
+                "res.groups.get_external_id failed; falling back to "
+                "ir.model.data lookup",
+                exc_info=True,
+            )
+            external_ids = None
+
+        if isinstance(external_ids, dict):
+            # Returned shape: {group_id: 'module.name'} or
+            # {group_id: ''} for records without an XML ID. Drop empties.
+            xml_ids = [
+                str(xmlid)
+                for xmlid in external_ids.values()
+                if isinstance(xmlid, str) and xmlid and "." in xmlid
+            ]
+            if xml_ids:
+                return xml_ids
+
+        # Legacy fallback: ir.model.data direct read. Only succeeds for
+        # privileged users but kept as a safety net for non-standard
+        # Odoo configurations where get_external_id might be missing.
+        try:
+            xmlid_data: Any = await client.execute_kw(
+                "ir.model.data",
+                "search_read",
+                [
+                    [
+                        ["model", "=", "res.groups"],
+                        ["res_id", "in", group_ids],
+                    ]
+                ],
+                {"fields": ["module", "name"]},
+            )
+        except Exception:
+            logger.debug(
+                "ir.model.data fallback also failed; group_xml_ids will be empty",
+                exc_info=True,
+            )
+            return []
+
+        if not isinstance(xmlid_data, list):
+            return []
+        return [
+            f"{rec['module']}.{rec['name']}"
+            for rec in xmlid_data
+            if (isinstance(rec, dict) and rec.get("module") and rec.get("name"))
+        ]
+
+    async def _call_has_group(
+        self,
+        client: OdooClientBase,
+        uid: int,
+        xmlid: str,
+    ) -> bool | None:
+        """Call ``res.users.has_group`` with the right form for the Odoo version.
+
+        Odoo 17 expects ``has_group(xmlid)`` (uid implicit from the session),
+        while Odoo 18+ expects ``has_group([uid], xmlid)`` (recordset form).
+        The two forms are mutually exclusive: passing the recordset to Odoo
+        17 raises "Users.has_group() takes 2 positional arguments but 3 were
+        given", and passing just the xmlid to Odoo 18+ returns ``False``
+        unconditionally.
+
+        We try the Odoo 18+ recordset form first (the dominant, supported
+        version), and fall back to the Odoo 17 form on TypeError-like
+        failures. Returns ``True``/``False`` on success or ``None`` if both
+        forms failed (the caller decides what to do — typically fail-closed).
+        """
+        # Try Odoo 18+ form first
+        try:
+            result = await client.execute_kw(
+                "res.users",
+                "has_group",
+                [[uid], xmlid],
+            )
+            return bool(result)
+        except Exception as exc_18:
+            # Fall back to Odoo 17 form (xmlid only, uid from session)
+            try:
+                result = await client.execute_kw(
+                    "res.users",
+                    "has_group",
+                    [xmlid],
+                )
+                return bool(result)
+            except Exception:
+                logger.debug(
+                    "has_group failed for %s with both call forms; first error: %s",
+                    xmlid,
+                    exc_18,
+                    exc_info=True,
+                )
+                return None
 
     async def _detect_admin_via_xmlid(self, result: AuthResult) -> AuthResult:
         """Detect admin status using ``res.users.has_group()`` with XML IDs.
@@ -295,23 +516,18 @@ class AuthManager:
             return result
         client = self._get_active_client_unchecked()
         for xmlid in ("base.group_system", "base.group_erp_manager"):
-            try:
-                has_group: Any = await client.execute_kw(
-                    "res.users",
-                    "has_group",
-                    [[result.uid], xmlid],
-                )
-                # Odoo's has_group returns a boolean. Be strict about the
-                # type check to avoid false positives when the mock or an
-                # unexpected response returns a non-boolean truthy value.
-                if has_group is True:
-                    result.is_admin = True
-                    return result
-            except Exception:
-                logger.debug("has_group check failed for %s", xmlid, exc_info=True)
+            has_group = await self._call_has_group(client, result.uid, xmlid)
+            # Strict boolean check — only True should grant admin.
+            if has_group is True:
+                result.is_admin = True
+                return result
         return result
 
-    async def _verify_admin_via_has_group(self, client: OdooClientBase) -> bool:
+    async def _verify_admin_via_has_group(
+        self,
+        client: OdooClientBase,
+        uid: int,
+    ) -> bool:
         """Verify admin status by calling ``res.users.has_group`` server-side.
 
         This protects against a compromised proxy or MITM tampering with the
@@ -319,24 +535,17 @@ class AuthManager:
         call is executed as the authenticated user against Odoo, so the
         result reflects real group membership in the database.
 
-        Falls back to ``False`` if the check fails (fail-closed) — better to
-        downgrade a real admin's privileges than to grant admin to a user
-        whose status cannot be verified.
+        Uses ``_call_has_group()`` for cross-version compatibility (Odoo 17
+        vs Odoo 18+ have different call signatures). See that method's
+        docstring for the version detail and regression notes.
+
+        Falls back to ``False`` if the check fails on both call forms
+        (fail-closed) — better to downgrade a real admin's privileges than
+        to grant admin to a user whose status cannot be verified.
         """
-        try:
-            result = await client.execute_kw(
-                "res.users",
-                "has_group",
-                ["base.group_system"],
-            )
-            return bool(result)
-        except Exception:
-            # Fail closed — if we can't verify, assume not admin.
-            logger.debug(
-                "Admin verification via has_group failed; defaulting to False",
-                exc_info=True,
-            )
-            return False
+        has_group = await self._call_has_group(client, uid, "base.group_system")
+        # has_group may be None (both call forms failed) → fail closed.
+        return has_group is True
 
     def _get_active_client_unchecked(self) -> OdooClientBase:
         """Return the active client without timeout checks.

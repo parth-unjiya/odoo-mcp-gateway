@@ -16,9 +16,14 @@ from odoo_mcp_gateway.plugins.core.helpers import (
     get_auth_info,
     get_client,
     get_uid,
+    get_valid_states,
     next_month,
 )
 
+# Defense-in-depth fallback. The runtime check via get_valid_states is
+# preferred because Odoo introduces / removes states between versions, but
+# we keep this static set so the plugin still works if the live schema
+# probe fails (network blip, ACL hiccup, etc.).
 _VALID_LEAVE_STATES = frozenset({"draft", "confirm", "validate1", "validate", "refuse"})
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -363,8 +368,11 @@ class HRPlugin(OdooPlugin):
             if gate_error:
                 return {"error": gate_error}
 
-            if state and state not in _VALID_LEAVE_STATES:
-                return {"error": f"Invalid state: {state!r}"}
+            if state:
+                live_states = await get_valid_states(client, "hr.leave")
+                valid = live_states or _VALID_LEAVE_STATES
+                if state not in valid:
+                    return {"error": f"Invalid state: {state!r}"}
 
             uid = get_uid(context)
             if uid == 0:
@@ -521,18 +529,54 @@ class HRPlugin(OdooPlugin):
                 if isinstance(sanitized, dict):
                     values = sanitized
 
+                # Probe the leave type's request_unit. If it's hour-based
+                # (e.g. 'hour' or 'half_day'), Odoo silently rewrites the
+                # caller's full-day datetimes to today's working hours,
+                # which silently mangles their request. Surface a warning
+                # so the caller knows to verify the dates after creation.
+                warning: str | None = None
+                try:
+                    leave_types = await client.execute_kw(
+                        "hr.leave.type",
+                        "read",
+                        [[leave_type_id]],
+                        {"fields": ["request_unit"]},
+                    )
+                    unit = (
+                        leave_types[0].get("request_unit")
+                        if leave_types and isinstance(leave_types[0], dict)
+                        else None
+                    )
+                    if unit and unit != "day":
+                        warning = (
+                            f"Leave type uses request unit '{unit}' "
+                            "(not full days). Odoo may rewrite your "
+                            "date_from/date_to to fit the configured "
+                            "working hours. Verify the saved record "
+                            "after creation."
+                        )
+                except Exception:  # noqa: S110 - informational warning only
+                    # Best-effort: the warning is purely informational, so we
+                    # silently move on if Odoo's hr.leave.type isn't readable
+                    # (e.g. transient ACL hiccup, network blip). The leave
+                    # creation itself still proceeds.
+                    pass
+
                 leave_id = await client.execute_kw(
                     "hr.leave",
                     "create",
                     [values],
                 )
-                return {
+                response: dict[str, Any] = {
                     "status": "created",
                     "leave_id": leave_id,
                     "employee": employees[0]["name"],
                     "date_from": date_from,
                     "date_to": date_to,
                 }
+                if warning:
+                    response["warning"] = warning
+                return response
             except Exception as e:
                 model_err = format_model_error("hr.employee", e)
                 return {"error": model_err or context.sanitize_error(e)}

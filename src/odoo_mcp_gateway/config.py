@@ -34,7 +34,11 @@ class Settings(BaseSettings):
     mcp_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     # ── YAML config directory ────────────────────────────────────────
-    config_dir: str = "."
+    # Default to ``./config`` (the repo layout). If that directory
+    # doesn't exist OR contains no YAML files, ``load_config()`` will
+    # fall back to the current directory and log a warning. Override
+    # with ``CONFIG_DIR=/path/to/yaml`` env var or .env entry.
+    config_dir: str = "./config"
 
     # ── Performance / limits ─────────────────────────────────────────
     cache_ttl_seconds: int = 3600

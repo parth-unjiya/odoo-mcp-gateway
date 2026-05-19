@@ -270,14 +270,22 @@ class TestGetMyLeaves:
 
     async def test_with_state_filter(self, tools, mock_context):
         _, client = mock_context
+        # Call order:
+        #   1) ``fields_get`` for the live state-whitelist probe
+        #      (get_valid_states) — added so the plugin tracks v17/v18/v19
+        #      selection differences instead of relying solely on a static
+        #      frozen-set;
+        #   2) employee lookup;
+        #   3) hr.leave search_read.
         client.execute_kw.side_effect = [
+            {"state": {"selection": [["draft", "To Submit"]]}},
             [{"id": 1}],
             [],
         ]
         result = await tools["get_my_leaves"](state="draft")
         assert result["count"] == 0
-        # Verify state domain was added
-        call_args = client.execute_kw.call_args_list[1]
+        # Verify state domain was added on the last (search_read) call
+        call_args = client.execute_kw.call_args_list[-1]
         domain = call_args[0][2][0]
         assert ["state", "=", "draft"] in domain
 
@@ -296,8 +304,14 @@ class TestGetMyLeaves:
 class TestRequestLeave:
     async def test_request_leave_success(self, tools, mock_context):
         _, client = mock_context
+        # Call order:
+        #   1) employee lookup;
+        #   2) hr.leave.type read (probes request_unit for the new
+        #      hour-coercion warning);
+        #   3) hr.leave create.
         client.execute_kw.side_effect = [
             [{"id": 1, "name": "John"}],
+            [{"id": 1, "request_unit": "day"}],
             99,  # leave ID
         ]
         result = await tools["request_leave"](
@@ -311,9 +325,12 @@ class TestRequestLeave:
         assert result["employee"] == "John"
         assert result["date_from"] == "2025-07-01"
         assert result["date_to"] == "2025-07-05"
+        # Day-unit leave type means no coercion warning.
+        assert "warning" not in result
 
-        # Verify create was called with reason
-        create_call = client.execute_kw.call_args_list[1]
+        # Verify create was called with reason — the create is the LAST
+        # call after the leave-type probe.
+        create_call = client.execute_kw.call_args_list[-1]
         values = create_call[0][2][0]
         assert values["name"] == "Summer holiday"
 
@@ -321,6 +338,7 @@ class TestRequestLeave:
         _, client = mock_context
         client.execute_kw.side_effect = [
             [{"id": 1, "name": "John"}],
+            [{"id": 2, "request_unit": "day"}],
             100,
         ]
         result = await tools["request_leave"](
@@ -329,8 +347,9 @@ class TestRequestLeave:
             date_to="2025-08-02",
         )
         assert result["status"] == "created"
-        # Verify no "name" field when reason is empty
-        create_call = client.execute_kw.call_args_list[1]
+        # Verify no "name" field when reason is empty — create is the
+        # last call after the leave-type probe.
+        create_call = client.execute_kw.call_args_list[-1]
         values = create_call[0][2][0]
         assert "name" not in values
 
@@ -353,6 +372,67 @@ class TestRequestLeave:
             date_to="2025-07-05",
         )
         assert result["error"] == "Not authenticated"
+
+    async def test_request_leave_hour_unit_includes_warning(self, tools, mock_context):
+        """When the leave type uses an hour-based request_unit, Odoo
+        silently coerces full-day datetimes to today's working hours.
+        The tool surfaces a warning so the caller knows to re-verify
+        the saved record. Tracked as A13.
+        """
+        _, client = mock_context
+        client.execute_kw.side_effect = [
+            [{"id": 1, "name": "John"}],
+            [{"id": 5, "request_unit": "hour"}],
+            123,
+        ]
+        result = await tools["request_leave"](
+            leave_type_id=5,
+            date_from="2025-09-01",
+            date_to="2025-09-01",
+        )
+
+        assert result["status"] == "created"
+        assert "warning" in result
+        assert "hour" in result["warning"]
+        assert "Verify" in result["warning"]
+
+    async def test_request_leave_half_day_includes_warning(self, tools, mock_context):
+        """Half-day request_unit is also non-day — same warning fires."""
+        _, client = mock_context
+        client.execute_kw.side_effect = [
+            [{"id": 1, "name": "John"}],
+            [{"id": 6, "request_unit": "half_day"}],
+            124,
+        ]
+        result = await tools["request_leave"](
+            leave_type_id=6,
+            date_from="2025-09-02",
+            date_to="2025-09-02",
+        )
+
+        assert "warning" in result
+        assert "half_day" in result["warning"]
+
+    async def test_request_leave_probe_failure_swallowed(self, tools, mock_context):
+        """If the leave-type probe errors out the create still proceeds —
+        the warning is purely informational, not a blocker.
+        """
+        _, client = mock_context
+        client.execute_kw.side_effect = [
+            [{"id": 1, "name": "John"}],
+            RuntimeError("network blip"),
+            125,
+        ]
+        result = await tools["request_leave"](
+            leave_type_id=7,
+            date_from="2025-09-03",
+            date_to="2025-09-03",
+        )
+
+        assert result["status"] == "created"
+        assert result["leave_id"] == 125
+        # No warning when probe failed — we can't tell what the unit is.
+        assert "warning" not in result
 
 
 # ── get_my_profile tests ────────────────────────────────────────

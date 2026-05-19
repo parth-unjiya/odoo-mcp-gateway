@@ -180,6 +180,103 @@ class TestReadGroup:
         call_kwargs = mock_client.execute_kw.call_args[0][3]
         assert call_kwargs["limit"] == 500
 
+    async def test_falls_back_to_formatted_read_group(self) -> None:
+        """read_group 'method not found' falls back to formatted_read_group."""
+        fallback_groups = [
+            {"state": "draft", "__count": 5},
+        ]
+        mock_client = make_mock_client()
+
+        call_log: list[str] = []
+
+        async def execute_kw(
+            model: str,
+            method: str,
+            args: list[Any],
+            kwargs: dict[str, Any] | None = None,
+        ) -> Any:
+            call_log.append(method)
+            if method == "read_group":
+                # Simulate Odoo "method not found" type error
+                raise Exception("read_group does not exist on model sale.order")
+            if method == "formatted_read_group":
+                return fallback_groups
+            raise AssertionError(f"unexpected method {method}")
+
+        mock_client.execute_kw = AsyncMock(side_effect=execute_kw)
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            fields=["state"],
+            groupby=["state"],
+        )
+
+        assert "error" not in resp
+        assert resp["groups"] == fallback_groups
+        assert call_log == ["read_group", "formatted_read_group"]
+
+    async def test_fallback_reraises_original_when_both_fail(self) -> None:
+        """If both read_group and formatted_read_group fail, the original error wins."""
+        mock_client = make_mock_client()
+
+        async def execute_kw(
+            model: str,
+            method: str,
+            args: list[Any],
+            kwargs: dict[str, Any] | None = None,
+        ) -> Any:
+            if method == "read_group":
+                raise OdooAccessError("read_group method not found")
+            if method == "formatted_read_group":
+                raise OdooAccessError("formatted_read_group also broken")
+            raise AssertionError(f"unexpected method {method}")
+
+        mock_client.execute_kw = AsyncMock(side_effect=execute_kw)
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            fields=["state"],
+            groupby=["state"],
+        )
+
+        assert "error" in resp
+        # The sanitized error message should mention access denial
+        # (OdooAccessError -> "Access denied")
+        assert "Access denied" in resp["error"]
+
+    async def test_non_fallback_errors_propagate(self) -> None:
+        """Errors that aren't 'method not found' should propagate unchanged."""
+        mock_client = make_mock_client()
+
+        async def execute_kw(
+            model: str,
+            method: str,
+            args: list[Any],
+            kwargs: dict[str, Any] | None = None,
+        ) -> Any:
+            if method == "read_group":
+                # A real ACL/domain error, NOT a missing-method error
+                raise OdooAccessError("you do not have access")
+            raise AssertionError(f"unexpected fallback to {method}")
+
+        mock_client.execute_kw = AsyncMock(side_effect=execute_kw)
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            fields=["state"],
+            groupby=["state"],
+        )
+
+        assert "error" in resp
+        # Only ONE call should have happened (no fallback)
+        assert mock_client.execute_kw.call_count == 1
+
     async def test_temporal_groupby(self) -> None:
         """Temporal groupby syntax (e.g. create_date:month) passes validation."""
         groups = [

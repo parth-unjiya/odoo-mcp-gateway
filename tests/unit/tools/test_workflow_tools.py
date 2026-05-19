@@ -548,3 +548,66 @@ class TestGetRecordActions:
         resp = await tools["get_record_actions"](model="INVALID!", record_id=1)
 
         assert "error" in resp
+
+
+class TestWriteFieldTransitions:
+    """v0.2.2: get_record_actions handles write:field transitions.
+
+    For models like helpdesk.ticket whose state machine is driven by
+    writing a many2one (stage_id) rather than calling Odoo methods, the
+    workflow advertises synthetic 'write:field' actions. The tool
+    response surfaces these distinctly so the AI client knows to use
+    update_record rather than execute_method.
+    """
+
+    async def test_write_action_surfaces_as_update_record_hint(self) -> None:
+        # The helpdesk ticket workflow uses write:stage_id transitions.
+        # Verify get_record_actions returns transition_via='update_record'
+        # and write_field='stage_id' for those entries.
+        from mcp.server.fastmcp import FastMCP
+
+        from odoo_mcp_gateway.core.workflow.registry import WorkflowRegistry
+        from odoo_mcp_gateway.tools.workflow import register_workflow_tools
+
+        from ..tools.conftest import make_gateway, make_mock_client
+
+        registry = WorkflowRegistry()
+        registry.load_stock_workflows()
+        # Confirm helpdesk workflow is loaded
+        wf = registry.get("helpdesk.ticket")
+        assert wf is not None, "helpdesk.ticket workflow not loaded"
+
+        # Mock client returns a ticket with a "New" stage value (id=1)
+        mock_client = make_mock_client(
+            execute_kw_return=[{"id": 1, "stage_id": [1, "New"]}]
+        )
+        gateway = make_gateway(mock_client=mock_client, is_admin=True)
+
+        # Register workflow tools on a throwaway server
+        server = FastMCP(name="test")
+        register_workflow_tools(server, gateway, registry)
+        fn = None
+        for name, tool in server._tool_manager._tools.items():
+            if name == "get_record_actions":
+                fn = tool.fn
+                break
+        assert fn is not None
+
+        resp = await fn(model="helpdesk.ticket", record_id=1)
+        assert "actions" in resp
+        actions = resp["actions"]
+        # At least one action should be a write: transition surfaced as
+        # update_record style
+        write_actions = [
+            a for a in actions if a.get("transition_via") == "update_record"
+        ]
+        assert write_actions, (
+            "Expected at least one update_record-style transition for "
+            "helpdesk.ticket; got actions: " + repr(actions)
+        )
+        # And the synthetic 'assign_ticket' etc. should NOT appear as methods
+        method_names = [a.get("method") for a in actions if a.get("method")]
+        synthetic = {"assign_ticket", "resolve_ticket", "close_ticket", "reopen_ticket"}
+        assert not (set(method_names) & synthetic), (
+            f"Synthetic method names leaked into response: {method_names}"
+        )

@@ -96,12 +96,19 @@ class TestGetClientSessionIsolation:
         _get_client(gw)
         gw.auth_managers["session_a"].get_active_client.assert_called_once()
 
-    def test_falls_back_when_session_key_not_in_managers(self) -> None:
+    def test_refuses_when_session_key_not_in_managers(self) -> None:
+        """v0.2.2 hardening: stale contextvar key must NOT fall through.
+
+        Previously the resolver fell back to the only remaining session,
+        which silently rebound a stale request to a different user. With
+        the strict resolution, a contextvar key not present in
+        ``auth_managers`` raises rather than picking a residual session.
+        """
         gw = _mock_gateway("session_a")
         set_current_session_key("nonexistent")
         try:
-            _get_client(gw)
-            gw.auth_managers["session_a"].get_active_client.assert_called_once()
+            with pytest.raises(ValueError, match="no longer active"):
+                _get_client(gw)
         finally:
             set_current_session_key(None)
 
@@ -132,12 +139,13 @@ class TestGetAuthManagerSessionIsolation:
         mgr = _get_auth_manager(gw)
         assert mgr is gw.auth_managers["only_session"]
 
-    def test_falls_back_when_session_key_not_in_managers(self) -> None:
+    def test_refuses_when_session_key_not_in_managers(self) -> None:
+        """v0.2.2 hardening: same strict-resolution contract as _get_client."""
         gw = _mock_gateway("real_session")
         set_current_session_key("ghost_session")
         try:
-            mgr = _get_auth_manager(gw)
-            assert mgr is gw.auth_managers["real_session"]
+            with pytest.raises(ValueError, match="no longer active"):
+                _get_auth_manager(gw)
         finally:
             set_current_session_key(None)
 

@@ -214,3 +214,75 @@ class TestGetOnchange:
             "title": "Warning",
             "message": "Partner has overdue invoices",
         }
+
+    async def test_api_status_ok_when_changes_present(self) -> None:
+        """When onchange returns real changes, _api_status is 'ok'."""
+        onchange_result = {
+            "value": {"amount_total": 100.0},
+            "warning": None,
+            "domain": {},
+        }
+        mock_client = make_mock_client(execute_kw_return=onchange_result)
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            values={"partner_id": 1},
+            changed_field="partner_id",
+        )
+
+        assert resp["_api_status"] == "ok"
+        # No hint on the happy path
+        assert "_api_hint" not in resp
+
+    async def test_api_status_no_changes_for_empty_value(self) -> None:
+        """Empty value + no warning is flagged as no_changes_or_unsupported."""
+        onchange_result = {"value": {}, "warning": None, "domain": {}}
+        mock_client = make_mock_client(execute_kw_return=onchange_result)
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            values={"partner_id": 1},
+            changed_field="partner_id",
+        )
+
+        assert resp["_api_status"] == "no_changes_or_unsupported"
+        assert "_api_hint" in resp
+        assert "computed fields" in resp["_api_hint"]
+
+    async def test_api_status_no_changes_for_empty_dict(self) -> None:
+        """Bare empty dict result is also flagged as no_changes_or_unsupported."""
+        mock_client = make_mock_client(execute_kw_return={})
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            values={"partner_id": 1},
+            changed_field="partner_id",
+        )
+
+        assert resp["_api_status"] == "no_changes_or_unsupported"
+        assert "_api_hint" in resp
+
+    async def test_api_status_ok_when_warning_only(self) -> None:
+        """Warning present but no value changes is still 'ok' (real signal)."""
+        onchange_result = {
+            "value": {},
+            "warning": {"title": "Heads up", "message": "Check pricing"},
+            "domain": {},
+        }
+        mock_client = make_mock_client(execute_kw_return=onchange_result)
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(
+            model="sale.order",
+            values={"partner_id": 1},
+            changed_field="partner_id",
+        )
+
+        assert resp["_api_status"] == "ok"

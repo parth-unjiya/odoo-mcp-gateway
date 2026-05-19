@@ -11,7 +11,12 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
-_MODEL_PATTERN = re.compile(r"^[a-z][a-z0-9_.]*$")
+# Match canonical Odoo model identifiers: segments separated by single
+# dots, each segment lowercase alnum/underscore. Previously the looser
+# ``[a-z][a-z0-9_.]*`` pattern accepted ``res.partner.`` (trailing dot)
+# and ``res..partner`` (empty segment) — both would silently desync
+# the blocked-model set from the real catalog.
+_MODEL_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
 _METHOD_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
@@ -183,12 +188,49 @@ def load_config(config_dir: str) -> GatewayConfig:
 
     Looks for restrictions.yaml, rbac.yaml, model_access.yaml.
     Missing files are handled gracefully with defaults.
+
+    If ``config_dir`` does not exist OR contains none of the expected
+    files, a fallback attempt is made on the current working directory
+    (so users who didn't set ``CONFIG_DIR`` still pick up YAML files
+    sitting alongside their command-line invocation).
     """
     base = Path(config_dir)
+    candidate_files = ("restrictions.yaml", "rbac.yaml", "model_access.yaml")
+
+    def _any_yaml_present(p: Path) -> bool:
+        return any((p / name).exists() for name in candidate_files)
+
+    if not base.exists() or not _any_yaml_present(base):
+        # Try CWD as a fallback before falling through to defaults.
+        cwd_fallback = Path(".")
+        if cwd_fallback.exists() and _any_yaml_present(cwd_fallback):
+            _log.info(
+                "No YAML configs in %s; falling back to current directory",
+                base,
+            )
+            base = cwd_fallback
+
+    _log.info(
+        "Loading gateway config from %s (exists=%s)",
+        base.resolve(),
+        base.exists(),
+    )
 
     restrictions_data = _load_yaml_file(base / "restrictions.yaml")
     rbac_data = _load_yaml_file(base / "rbac.yaml")
     model_access_data = _load_yaml_file(base / "model_access.yaml")
+
+    loaded = [name for name in candidate_files if (base / name).exists()]
+    if loaded:
+        _log.info("Loaded YAML config files: %s", ", ".join(loaded))
+    else:
+        _log.warning(
+            "No YAML config files found in %s — gateway runs with "
+            "hardcoded defaults only (default_policy=deny). To customise, "
+            "copy config/*.yaml.example to config/*.yaml and set "
+            "CONFIG_DIR if needed.",
+            base.resolve(),
+        )
 
     restrictions = RestrictionConfig(**restrictions_data)
     rbac = RBACConfig(**rbac_data)

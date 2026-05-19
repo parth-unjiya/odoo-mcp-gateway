@@ -113,6 +113,46 @@ class JsonRpcClient(OdooClientBase):
         if sid:
             self._session_id = Credential(sid)
 
+        # Detect HTML responses up front (typically 404 pages from invalid
+        # model/method names or a wrong base URL). Without this, ``.json()``
+        # raises a low-level decoding error that leaks ``response.text``
+        # — including the full Werkzeug stack trace — through the generic
+        # ``Non-JSON response`` message.
+        #
+        # The headers / text attributes are wrapped in str() so we don't
+        # crash on test doubles that return MagicMock for missing fields.
+        content_type_raw = ""
+        try:
+            content_type_raw = str(response.headers.get("content-type", "") or "")
+        except Exception:
+            content_type_raw = ""
+        content_type = content_type_raw.lower()
+
+        body_preview = ""
+        try:
+            body_text = response.text
+            if isinstance(body_text, str):
+                body_preview = body_text[:5].lower()
+        except Exception:
+            body_preview = ""
+
+        if "html" in content_type or body_preview in ("<!doc", "<html"):
+            try:
+                status = int(response.status_code)
+            except Exception:
+                status = 0
+            if status == 404:
+                raise OdooMissingError(
+                    "Odoo endpoint not found (HTTP 404). This usually means "
+                    "the model or method does not exist, or the URL path is "
+                    "wrong.",
+                    code="HTTP_404",
+                )
+            raise OdooConnectionError(
+                f"Unexpected HTML response from Odoo (HTTP {status}). "
+                "Verify the gateway URL points at a JSON-RPC endpoint.",
+            )
+
         try:
             data: dict[str, Any] = response.json()
         except (ValueError, json.JSONDecodeError) as exc:

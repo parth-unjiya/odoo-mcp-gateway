@@ -269,14 +269,24 @@ def register_workflow_tools(
         display_name: str,
         is_admin: bool,
     ) -> dict[str, Any]:
-        """Build response for stage-based (many2one) workflows."""
-        # Collect all unique actions from all states
+        """Build response for stage-based (many2one) workflows.
+
+        Stage-based workflows (helpdesk.ticket, project.task, crm.lead)
+        usually express every transition as ``write:stage_id`` — the
+        action string is identical across transitions. Two transitions
+        can also share the same target_state (e.g. ``new → in_progress``
+        AND ``solved → in_progress`` are both "move to In Progress"
+        but the second is semantically *reopening*). The dedupe key
+        therefore includes the human-facing label so user-distinct
+        transitions all survive — ``(action, target_state, label)``.
+        """
         all_transitions: list[Any] = []
-        seen_actions: set[str] = set()
+        seen: set[tuple[str, str, str]] = set()
         for state_def in wf.states.values():
             for t in state_def.transitions:
-                if t.action not in seen_actions:
-                    seen_actions.add(t.action)
+                key = (str(t.action), str(t.target_state), str(t.label))
+                if key not in seen:
+                    seen.add(key)
                     all_transitions.append(t)
 
         actions = _filter_transitions(wf, tuple(all_transitions), model, is_admin)
@@ -304,10 +314,60 @@ def register_workflow_tools(
         model: str,
         is_admin: bool,
     ) -> list[dict[str, Any]]:
-        """Filter transitions by restriction checker, return as dicts."""
+        """Filter transitions and return as dicts annotated by transition type.
+
+        Two kinds of transitions are supported:
+
+        * Standard method-call transitions (e.g. ``action_confirm``): the
+          ``action`` string is the Odoo method name. Filtered through
+          ``restrictions.check_method_access``. The response includes
+          ``"transition_via": "execute_method"``.
+        * Field-write transitions (action starts with ``write:``): the
+          transition is performed by writing the named field via
+          ``update_record``. The response surfaces ``"transition_via":
+          "update_record"`` and a ``"write_field"`` hint so the AI
+          client can construct the correct call. ``check_method_access``
+          is skipped — there's no method to authorize, just a field write.
+
+        Transitions with version constraints (``min_version`` /
+        ``max_version``) are filtered against the currently detected
+        Odoo major version so callers never see, e.g., ``action_done``
+        on Odoo 19 or ``action_lock`` on Odoo 17.
+        """
+        adapter = getattr(gateway, "version_adapter", None)
+        current_major: int | None = (
+            getattr(adapter, "major_version", None) if adapter is not None else None
+        )
+        # major_version=0 (the abstract default) is treated as "unknown"
+        # so a misconfigured adapter doesn't silently filter everything.
+        if current_major == 0:
+            current_major = None
+
         actions: list[dict[str, Any]] = []
         for t in transitions:
-            # Check if the method is allowed
+            # Skip transitions that don't apply to this Odoo version.
+            is_supported = getattr(t, "is_supported_on", None)
+            if callable(is_supported) and not is_supported(current_major):
+                continue
+
+            # Field-write transitions don't have a corresponding Odoo
+            # method — they are documentation that the AI should use
+            # update_record on the named field.
+            if isinstance(t.action, str) and t.action.startswith("write:"):
+                write_field = t.action.split(":", 1)[1] or wf.state_field
+                actions.append(
+                    {
+                        "method": None,
+                        "transition_via": "update_record",
+                        "write_field": write_field,
+                        "label": t.label,
+                        "description": t.description,
+                        "target_state": t.target_state,
+                    }
+                )
+                continue
+
+            # Standard method-call transition — apply restriction checker
             method_msg = gateway.restrictions.check_method_access(
                 model, t.action, is_admin
             )
@@ -317,6 +377,7 @@ def register_workflow_tools(
             actions.append(
                 {
                     "method": t.action,
+                    "transition_via": "execute_method",
                     "label": t.label,
                     "description": t.description,
                     "target_state": t.target_state,

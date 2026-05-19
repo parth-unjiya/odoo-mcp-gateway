@@ -87,6 +87,14 @@ _ALWAYS_BLOCKED_MODELS: frozenset[str] = frozenset(
         "ir.exports.line",  # column definitions for ir.exports
         # Bulk system mailings
         "digest.digest",  # automated digest mailings (abuse / spoof vector)
+        # Metamodel — exposing ir.model lets non-admins enumerate every
+        # installed model (including internal/custom ones) and craft
+        # targeted probes against models they should not even know about.
+        # The dedicated ``list_models`` tool exposes a curated subset
+        # through the model_registry, which does its own admin-context
+        # query at startup; direct CRUD on ir.model is never appropriate.
+        "ir.model",
+        "ir.model.fields",
     }
 )
 

@@ -15,8 +15,11 @@ from odoo_mcp_gateway.plugins.core.helpers import (
     get_auth_info,
     get_client,
     get_uid,
+    get_valid_states,
 )
 
+# Fallback set. project.task.state values changed shape in Odoo 17 and may
+# evolve further — the live ``get_valid_states`` probe keeps this honest.
 _VALID_TASK_STATES = frozenset(
     {
         "01_in_progress",
@@ -78,8 +81,11 @@ class ProjectPlugin(OdooPlugin):
             if gate_error:
                 return {"error": gate_error}
 
-            if state and state not in _VALID_TASK_STATES:
-                return {"error": f"Invalid state: {state!r}"}
+            if state:
+                live_states = await get_valid_states(client, "project.task")
+                valid = live_states or _VALID_TASK_STATES
+                if state not in valid:
+                    return {"error": f"Invalid state: {state!r}"}
 
             uid = get_uid(context)
             if uid == 0:
@@ -173,11 +179,40 @@ class ProjectPlugin(OdooPlugin):
                 if isinstance(restriction_msg, str):
                     return {"error": restriction_msg}
 
+                # IDOR protection: scope project visibility and tasks to the
+                # current user unless admin. Non-admin callers may only see
+                # project summaries for projects they manage or are visible to
+                # employees / followers, and the task stats are scoped to
+                # tasks they are assigned to. Admins see the full picture.
+                project_domain: list[Any] = [["id", "=", project_id]]
+                task_domain: list[Any] = [["project_id", "=", project_id]]
+                if not is_admin:
+                    # Visibility: manager OR employees-visible OR follower.
+                    # privacy_visibility values in Odoo 17+: 'followers',
+                    # 'employees', 'portal'. We allow 'employees' (any
+                    # internal user can see) and project where the caller
+                    # is the manager; 'followers'/'portal' would require
+                    # checking message_follower_ids which is expensive, so
+                    # users who only follow a private project won't see
+                    # stats (acceptable trade-off — they can still see
+                    # their own tasks via get_my_tasks).
+                    project_domain = [
+                        "&",
+                        ["id", "=", project_id],
+                        "|",
+                        ["user_id", "=", uid],
+                        ["privacy_visibility", "=", "employees"],
+                    ]
+                    # Task stats scoped to the caller's assignments only.
+                    # Odoo 17+ uses many2many ``user_ids`` (required by
+                    # this gateway), so the operator is ``in``.
+                    task_domain.append(["user_ids", "in", [uid]])
+
                 # Fetch project info
                 projects = await client.execute_kw(
                     "project.project",
                     "search_read",
-                    [[["id", "=", project_id]]],
+                    [project_domain],
                     {
                         "fields": [
                             "name",
@@ -204,7 +239,7 @@ class ProjectPlugin(OdooPlugin):
                 tasks = await client.execute_kw(
                     "project.task",
                     "search_read",
-                    [[["project_id", "=", project_id]]],
+                    [task_domain],
                     {
                         "fields": [
                             "name",
