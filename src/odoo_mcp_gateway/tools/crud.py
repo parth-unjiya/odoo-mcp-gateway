@@ -766,7 +766,16 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             return {"error": str(e)}
         except Exception as e:
             logger.exception("Unexpected error in search_count")
-            return {"error": gateway.sanitize_error(e)}
+            sanitised = gateway.sanitize_error(e)
+            # UAT LOW-1 (Odoo 17): when Odoo bubbles up a bare-model-name
+            # error (e.g. ``"website.helpdesk.ticket"`` for a missing
+            # model), prefix it with ``Model not found:`` so the caller
+            # can act on the message. We only rewrite when the sanitised
+            # message is JUST the model name (no spaces, matches it
+            # case-insensitively) — anything richer is left alone.
+            if sanitised and sanitised.strip().lower() == model.lower():
+                sanitised = f"Model not found: {model}"
+            return {"error": sanitised}
 
     @server.tool()
     async def create_record(

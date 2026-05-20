@@ -92,3 +92,35 @@ class TestSearchCount:
 
         assert "error" in resp
         assert "Access denied" in resp["error"]
+
+    async def test_missing_model_error_prefixed(self) -> None:
+        """UAT LOW-1 (Odoo 17) — bare-model-name error gets a prefix.
+
+        Odoo can bubble up an exception whose message is JUST the model
+        name (e.g. when the model does not exist). Previously this
+        surfaced as ``{"error": "website.helpdesk.ticket"}``, which is
+        a useless message. We now prefix with ``Model not found:`` so
+        the caller can act on it.
+        """
+        mock_client = make_mock_client()
+        mock_client.execute_kw = AsyncMock(
+            # Simulate Odoo's bare-model-name error text.
+            side_effect=Exception("website.helpdesk.ticket"),
+        )
+        gateway = make_gateway(
+            mock_client=mock_client,
+            restriction_config=RestrictionConfig(),
+        )
+        # Register the model as allowed to bypass restriction-layer reject.
+        from odoo_mcp_gateway.core.security.config_loader import ModelAccessConfig
+
+        gateway.restrictions._model_access = ModelAccessConfig(
+            default_policy="allow",
+        )
+
+        fn = _get_tool(gateway)
+        resp = await fn(model="website.helpdesk.ticket")
+
+        assert "error" in resp
+        assert resp["error"].startswith("Model not found:")
+        assert "website.helpdesk.ticket" in resp["error"]
