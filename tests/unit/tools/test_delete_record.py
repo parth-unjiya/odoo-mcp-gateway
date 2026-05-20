@@ -111,7 +111,8 @@ class TestDeleteRecord:
         resp = await fn(model="res.groups", record_id=1)
 
         assert "error" in resp
-        assert "administrator" in resp["error"]
+        # UAT M2: admin_only tier names the tier (was "administrator access").
+        assert "admin-only" in resp["error"]
 
     async def test_admin_only_model_admin_succeeds(self) -> None:
         mock_client = make_mock_client(execute_kw_return=True)

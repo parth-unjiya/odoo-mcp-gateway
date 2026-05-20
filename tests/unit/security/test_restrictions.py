@@ -82,7 +82,9 @@ class TestAdminOnly:
     def test_blocked_for_non_admin(self, checker: RestrictionChecker) -> None:
         msg = checker.check_model_access("res.groups", "read", False)
         assert msg is not None
-        assert "administrator access" in msg
+        # UAT M2: message names the tier explicitly.
+        assert "admin-only" in msg
+        assert "not an admin" in msg
 
     def test_allowed_for_admin_read(self, checker: RestrictionChecker) -> None:
         msg = checker.check_model_access("res.groups", "read", True)
@@ -110,12 +112,13 @@ class TestAdminWriteOnly:
     def test_write_blocked_non_admin(self, checker: RestrictionChecker) -> None:
         msg = checker.check_model_access("res.company", "write", False)
         assert msg is not None
-        assert "Write access" in msg
+        # UAT M2: write-only-for-admin tier produces a tier-named message.
+        assert "write only for admin" in msg
 
     def test_create_blocked_non_admin(self, checker: RestrictionChecker) -> None:
         msg = checker.check_model_access("res.country", "create", False)
         assert msg is not None
-        assert "Write access" in msg
+        assert "write only for admin" in msg
 
     def test_delete_blocked_non_admin(self, checker: RestrictionChecker) -> None:
         msg = checker.check_model_access("res.company", "delete", False)
@@ -232,13 +235,44 @@ class TestModelAccessAdminOnly:
     ) -> None:
         msg = checker.check_model_access("res.lang", "read", False)
         assert msg is not None
-        assert "administrator access" in msg
+        # UAT M2: same tier-named wording for model_access admin_only.
+        assert "admin-only" in msg
+        assert "not an admin" in msg
 
     def test_admin_only_in_model_access_allows_admin(
         self, checker: RestrictionChecker
     ) -> None:
         msg = checker.check_model_access("res.lang", "read", True)
         assert msg is None
+
+    def test_admin_only_message_distinct_from_always_blocked(
+        self, checker: RestrictionChecker
+    ) -> None:
+        """UAT M2 — admin_only and always_blocked produce DIFFERENT messages.
+
+        The Odoo 18 UAT caught that ``res.users`` (hardcoded always-
+        blocked) and ``res.groups`` (admin_only) both produced the same
+        "always blocked" wording for non-admin callers. That misled
+        operators who saw the model labelled as admin_only in
+        ``list_models``. Each tier now has its own distinct wording.
+        """
+        always_msg = checker.check_model_access("ir.config_parameter", "read", False)
+        admin_only_msg = checker.check_model_access("res.groups", "read", False)
+        admin_write_msg = checker.check_model_access("res.company", "create", False)
+
+        assert always_msg is not None
+        assert admin_only_msg is not None
+        assert admin_write_msg is not None
+
+        # Three distinct phrasings, one per tier.
+        assert "always blocked" in always_msg
+        assert "always blocked" not in admin_only_msg
+        assert "always blocked" not in admin_write_msg
+
+        assert "admin-only" in admin_only_msg
+        assert "admin-only" not in admin_write_msg
+
+        assert "write only for admin" in admin_write_msg
 
     def test_ir_model_always_blocked(self, checker: RestrictionChecker) -> None:
         """ir.model is hardcoded always-blocked — even admins can't go

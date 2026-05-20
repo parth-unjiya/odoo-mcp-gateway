@@ -178,6 +178,14 @@ class RestrictionChecker:
 
         Returns error message if denied, None if allowed.
         operation: 'read', 'create', 'write', 'delete'
+
+        UAT M2 (Odoo 18): the error message tiering MUST reflect the
+        actual tier the model lives in. Previously a model in the
+        hardcoded always-blocked list AND a model that was admin_only
+        both surfaced the same "always blocked" wording, confusing
+        callers who saw the model in ``list_models`` as ``admin_only``
+        but got an "always blocked" denial when probing as a non-admin.
+        Now each tier produces a distinct, role-aware message.
         """
         # 0. Hard-coded always-blocked models (cannot be overridden, blocks everyone)
         if model in _ALWAYS_BLOCKED_MODELS:
@@ -193,25 +201,40 @@ class RestrictionChecker:
                 )
             return None
 
-        # 1. always_blocked -> denied for everyone
+        # 1. always_blocked -> denied for everyone (config-driven tier).
+        # Distinct wording from hardcoded blocks above so operators can
+        # tell config-driven blocks from hardcoded ones in error logs.
         if model in self._always_blocked:
             return f"Model '{model}' is not accessible through the gateway"
 
-        # 2. admin_only restriction -> non-admin blocked
+        # 2. admin_only restriction -> non-admin blocked.
+        # UAT M2: explicitly name the tier ("admin-only") and the
+        # caller's role gap so the message is unambiguous. The previous
+        # wording elided the role gap and was too easy to mistake for
+        # an always-blocked verdict.
         if model in self._admin_only and not is_admin:
-            return f"Model '{model}' requires administrator access"
+            return (
+                f"Access denied: '{model}' is admin-only and the current "
+                "user is not an admin"
+            )
 
-        # 3. admin_write_only: read OK for all, write requires admin
+        # 3. admin_write_only: read OK for all, write requires admin.
+        # UAT M2: same correction — name the tier and the operation so
+        # a caller seeing the model as readable understands precisely
+        # WHY this write was refused.
         write_ops = {"create", "write", "delete"}
         if model in self._admin_write_only:
             if operation in write_ops and not is_admin:
-                return f"Write access to '{model}' requires administrator"
+                return f"Access denied: '{model}' allows write only for admin"
             return None
 
-        # 4. Check model_access config categories
+        # 4. Check model_access config categories (mirrors tier 2 wording).
         if model in self._access_admin_only:
             if not is_admin:
-                return f"Model '{model}' requires administrator access"
+                return (
+                    f"Access denied: '{model}' is admin-only and the current "
+                    "user is not an admin"
+                )
             return None
 
         if model in self._full_crud:

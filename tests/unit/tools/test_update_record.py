@@ -204,7 +204,8 @@ class TestUpdateRecord:
         )
 
         assert "error" in resp
-        assert "administrator" in resp["error"]
+        # UAT M2: admin_write_only tier message names the tier explicitly.
+        assert "write only for admin" in resp["error"]
 
     async def test_admin_write_only_admin_succeeds(self) -> None:
         mock_client = make_mock_client(execute_kw_return=True)

@@ -200,7 +200,8 @@ class TestSearchReadSecurity:
         resp = await fn(model="res.groups", fields=["name"])
 
         assert "error" in resp
-        assert "administrator" in resp["error"]
+        # UAT M2: admin_only tier names the tier (was "administrator access").
+        assert "admin-only" in resp["error"]
 
     async def test_applies_field_filtering(self) -> None:
         records = [
