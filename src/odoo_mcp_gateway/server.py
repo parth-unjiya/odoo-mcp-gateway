@@ -469,4 +469,16 @@ def create_server(settings: Settings) -> FastMCP:
     # plumbing it through every function signature.
     server._odoo_gateway = gateway  # type: ignore[attr-defined]
 
+    # Register the MCP completion handler (ADR-009). The handler
+    # completes prompt arguments and resource-template arguments for
+    # ``model``, ``method``, and ``record_id`` slots — Odoo's biggest
+    # UX win since users can't be expected to guess
+    # ``res.partner`` vs ``customer``.
+    from odoo_mcp_gateway.core.discovery.completions import build_completion_handler
+
+    # FastMCP's completion() decorator is loosely typed in the SDK;
+    # the cast suppresses mypy's untyped-call complaint without
+    # weakening any of our own typing.
+    server.completion()(build_completion_handler(gateway))  # type: ignore[no-untyped-call]
+
     return server

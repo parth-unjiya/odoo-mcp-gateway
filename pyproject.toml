@@ -66,6 +66,14 @@ observability = [
     "opentelemetry-sdk>=1.25",
     "opentelemetry-instrumentation-httpx>=0.46b0",
 ]
+# OAuth 2.1 JWT bearer auth (ADR-005). Install with
+# ``pip install odoo-mcp-gateway[oauth]`` to enable IdP-issued JWT
+# validation against a real OAuth issuer (Keycloak, Auth0, Entra,
+# etc.). Without this extra the gateway falls back to its built-in
+# opaque-token verifier from Sprint 1.
+oauth = [
+    "authlib>=1.6",
+]
 
 [project.entry-points."odoo_mcp_gateway.plugins"]
 hr = "odoo_mcp_gateway.plugins.core.hr:HRPlugin"

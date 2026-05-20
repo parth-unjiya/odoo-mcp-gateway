@@ -7,7 +7,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from odoo_mcp_gateway.core.security import (
     DANGEROUS_CONTEXT_KEYS,
@@ -256,6 +256,7 @@ async def _validate_writable_fields(
     model: str,
     values: dict[str, Any],
     check_required_non_empty: bool = False,
+    field_info: dict[str, Any] | None = None,
 ) -> str | None:
     """Pre-flight check: reject writes to readonly/computed fields.
 
@@ -273,15 +274,21 @@ async def _validate_writable_fields(
       to *missing required fields* on create. For update we don't
       enforce this because partial updates legitimately omit fields.
 
+    *field_info* may be supplied by the caller to share a previously-
+    fetched schema (e.g. by ``create_record`` which also calls the
+    elicitation detector) and avoid a duplicate ``fields_get`` round-
+    trip per write.
+
     Returns an error string on rejection, or ``None`` to proceed. Falls
     through silently when field inspection itself fails (defense-in-depth:
     Odoo will still apply its own ACLs).
     """
-    try:
-        field_info = await gateway.field_inspector.get_fields(client, model)
-    except Exception:
-        logger.debug("Field inspection failed for %s; skipping pre-flight", model)
-        return None
+    if field_info is None:
+        try:
+            field_info = await gateway.field_inspector.get_fields(client, model)
+        except Exception:
+            logger.debug("Field inspection failed for %s; skipping pre-flight", model)
+            return None
 
     if not field_info:
         return None
@@ -766,6 +773,7 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
         model: str,
         values: dict[str, Any],
         dry_run: bool = False,
+        ctx: Context[Any, Any, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a new record in an Odoo model.
 
@@ -773,6 +781,12 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             model: Target Odoo model name
             values: Field values for the new record
             dry_run: If True, validate without creating. Returns what would be sent.
+            ctx: MCP Context auto-injected by FastMCP. Used for
+                elicitation (ADR-008) when required fields are
+                missing — the server asks the client to supply them
+                rather than erroring out. Optional; if the client
+                doesn't expose elicitation we fall back to the
+                standard missing-field error.
         """
         try:
             model = _validate_model(model)
@@ -831,16 +845,68 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
             # Apply version-specific field renames on the values payload
             values = _apply_value_renames(gateway, model, values)
 
+            # ADR-008: Before failing on missing required fields, try
+            # to elicit them from the client. Capable clients render
+            # the elicitation as a form; older clients return a
+            # decline and we fall through to the standard error path.
+            # Skipped in dry_run (the caller is intentionally
+            # previewing what THEY supplied, not what's missing).
+            #
+            # We fetch the field schema ONCE here and reuse it for
+            # both elicitation detection and the writable-field
+            # pre-flight below — avoiding a duplicate fields_get
+            # round-trip per create.
+            preloaded_field_info: dict[str, Any] | None = None
+            if not dry_run:
+                from odoo_mcp_gateway.tools.elicitation import (
+                    detect_missing_required_fields,
+                    elicit_missing_fields,
+                )
+
+                try:
+                    preloaded_field_info = await gateway.field_inspector.get_fields(
+                        client, model
+                    )
+                except Exception:
+                    # Field inspection failure → skip BOTH elicitation
+                    # and the writable-field pre-flight; Odoo will
+                    # surface real errors at create time. We use {}
+                    # (empty dict) rather than None so the downstream
+                    # ``_validate_writable_fields(field_info={})``
+                    # short-circuits without retrying the inspector.
+                    preloaded_field_info = {}
+
+                if preloaded_field_info:
+                    missing = await detect_missing_required_fields(
+                        gateway,
+                        client,
+                        model,
+                        values,
+                        field_info=preloaded_field_info,
+                    )
+                    if missing:
+                        filled = await elicit_missing_fields(
+                            ctx, gateway, client, model, missing
+                        )
+                        if filled:
+                            # Merge elicited values WITHOUT overriding
+                            # the caller's original keys — explicit
+                            # intent always wins.
+                            values = {**filled, **values}
+
             # Pre-flight: catch readonly/computed fields and empty required
             # values before Odoo silently swallows them. Runs for BOTH real
             # and dry_run modes — dry_run must surface the same errors as a
-            # real call to be a useful preview.
+            # real call to be a useful preview. ``field_info`` is reused
+            # from the elicitation-detection step above so we make at most
+            # one ``fields_get`` per create.
             writable_msg = await _validate_writable_fields(
                 gateway,
                 client,
                 model,
                 values,
                 check_required_non_empty=True,
+                field_info=preloaded_field_info,
             )
             if writable_msg:
                 return {"error": writable_msg}
