@@ -4,9 +4,63 @@ from __future__ import annotations
 
 from typing import Any, Literal, overload
 
+from odoo_mcp_gateway.client.base import AuthResult
+
 from .config_loader import ModelAccessConfig, RBACConfig
 
 _REDACTED = "***"
+
+# Portal-typed group XML IDs we recognise. A user whose group set is
+# empty OR contains only entries from this set is classified as a
+# portal user. The list intentionally stays tight — only the canonical
+# Odoo portal groups — so we err on the side of NOT misclassifying
+# internal users with sparse group memberships as portal.
+_PORTAL_GROUP_XML_IDS: frozenset[str] = frozenset(
+    {
+        "base.group_portal",
+        "base.group_public",
+    }
+)
+
+
+def is_portal_user(auth_result: AuthResult | None) -> bool:
+    """Return ``True`` if the caller is a portal/external user.
+
+    Detection rule (defence-in-depth):
+
+    1. Admins are never portal — short-circuit on ``is_admin``.
+    2. Consult ``group_xml_ids`` first (stable across Odoo versions
+       and translations). When non-empty:
+       * If it contains ONLY recognised portal-typed group IDs
+         (``base.group_portal``, ``base.group_public``) → portal.
+       * If it contains any internal group → NOT portal.
+    3. When ``group_xml_ids`` is empty, fall back to the
+       locale-dependent ``groups`` field with the same rule. This
+       branch matters during the transition window where some clients
+       send only ``groups`` (e.g. legacy fixtures, older auth helpers).
+    4. If BOTH collections are empty, the user genuinely has zero
+       groups assigned → portal by elimination.
+
+    Returns ``False`` for unauthenticated callers — they have no
+    authorisation surface at all, so RBAC tiering doesn't apply.
+    """
+    if auth_result is None:
+        return False
+    if auth_result.is_admin:
+        return False
+    xml_ids = list(auth_result.group_xml_ids or [])
+    if xml_ids:
+        return all(g in _PORTAL_GROUP_XML_IDS for g in xml_ids)
+    # Fall back to ``groups`` (display names) when XML IDs aren't set.
+    # Same rule: non-empty + non-portal-only → internal.
+    groups = list(auth_result.groups or [])
+    if groups:
+        # Display names like "base.group_user" sometimes appear in
+        # ``groups`` too (auth_manager fills both for newer clients).
+        # We accept either spelling here for robustness.
+        return all(g in _PORTAL_GROUP_XML_IDS for g in groups)
+    # Both empty → genuine portal/anonymous-ish user.
+    return True
 
 
 class RBACManager:

@@ -70,6 +70,15 @@ class ModelAccessConfig(BaseModel):
     custom_models: dict[str, list[str]] = {}
     allowed_methods: dict[str, list[str]] = {}
     sensitive_fields: dict[str, list[str]] = {}
+    # UAT M1 / MED-2 (Odoo 18 + 19): portal users see a much smaller
+    # curated set via ``list_models``. When unset, the default is the
+    # safest tight allow-list (``res.partner`` only). The values listed
+    # here are intersected with the already-accessible model list — a
+    # model not in the user's RBAC scope cannot appear here. This is
+    # a UX correction, not a security control: Odoo's row-level ACL
+    # already clamps results, but listing 35+ model names a portal
+    # user cannot actually read overstates the attack surface.
+    portal_models: list[str] = []
 
     @field_validator("default_policy")
     @classmethod
@@ -91,6 +100,21 @@ class ModelAccessConfig(BaseModel):
                         f"Invalid model name '{clean}': must match [a-z][a-z0-9_.]*"
                     )
         return v
+
+    @field_validator("portal_models")
+    @classmethod
+    def validate_portal_model_names(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for name in v:
+            clean = name.split("#")[0].strip() if "#" in name else name.strip()
+            if not clean:
+                continue
+            if not _MODEL_PATTERN.match(clean):
+                raise ValueError(
+                    f"Invalid model name '{clean}': must match [a-z][a-z0-9_.]*"
+                )
+            cleaned.append(clean)
+        return cleaned
 
     @model_validator(mode="after")
     def check_no_contradictions(self) -> ModelAccessConfig:

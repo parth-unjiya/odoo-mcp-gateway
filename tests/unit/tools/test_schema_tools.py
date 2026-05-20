@@ -8,6 +8,7 @@ from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.core.discovery.models import AccessLevel, FieldInfo, ModelInfo
 from odoo_mcp_gateway.core.security.config_loader import (
+    ModelAccessConfig,
     RBACConfig,
     RestrictionConfig,
 )
@@ -271,6 +272,181 @@ class TestListModels:
         assert "error" in resp_bad_limit
         resp_bad_offset = await tools["list_models"](offset=-5)
         assert "error" in resp_bad_offset
+
+    async def test_portal_user_sees_narrower_default_list(self) -> None:
+        """UAT M1 / MED-2 — portal users default to a tight allow-list.
+
+        The previous code branched only ``is_admin`` vs ``not is_admin``,
+        which collapsed portal users into the same tier as internal demo
+        users. The new ``is_portal_user(...)`` helper detects empty /
+        portal-only group sets and clamps ``list_models`` accordingly.
+        """
+        from tests.unit.tools.conftest import make_auth_result
+
+        gateway = make_gateway(
+            auth_result=make_auth_result(
+                is_admin=False,
+                groups=[],
+                group_xml_ids=[],
+            ),
+        )
+        gateway.model_registry._models = {
+            "res.partner": ModelInfo(
+                name="res.partner",
+                description="Contact",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+            "sale.order": ModelInfo(
+                name="sale.order",
+                description="Order",
+                is_custom=False,
+                is_transient=False,
+                module="sale",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+            "crm.lead": ModelInfo(
+                name="crm.lead",
+                description="Lead",
+                is_custom=False,
+                is_transient=False,
+                module="crm",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+        }
+        gateway._models_discovered = True
+
+        tools = _get_tools(gateway)
+        resp = await tools["list_models"]()
+        names = {m["model"] for m in resp["models"]}
+        # Portal default: only res.partner. Everything else clamped out.
+        assert names == {"res.partner"}
+
+    async def test_rbac_tiers_strictly_decrease(self) -> None:
+        """Admin > internal > portal monotonically."""
+        from tests.unit.tools.conftest import make_auth_result
+
+        catalog = {
+            "res.partner": ModelInfo(
+                name="res.partner",
+                description="Contact",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+            "sale.order": ModelInfo(
+                name="sale.order",
+                description="Order",
+                is_custom=False,
+                is_transient=False,
+                module="sale",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+            "ir.model": ModelInfo(
+                name="ir.model",
+                description="Models",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.ADMIN_ONLY,
+            ),
+        }
+
+        counts: dict[str, int] = {}
+        for label, auth in (
+            (
+                "admin",
+                make_auth_result(
+                    is_admin=True,
+                    groups=["base.group_system"],
+                    group_xml_ids=["base.group_system"],
+                ),
+            ),
+            (
+                "internal",
+                make_auth_result(
+                    is_admin=False,
+                    groups=["base.group_user"],
+                    group_xml_ids=["base.group_user"],
+                ),
+            ),
+            (
+                "portal",
+                make_auth_result(
+                    is_admin=False,
+                    groups=[],
+                    group_xml_ids=["base.group_portal"],
+                ),
+            ),
+        ):
+            gateway = make_gateway(is_admin=auth.is_admin, auth_result=auth)
+            gateway.model_registry._models = dict(catalog)
+            gateway._models_discovered = True
+            tools = _get_tools(gateway)
+            resp = await tools["list_models"]()
+            counts[label] = resp["count"]
+
+        # Strict ordering: admin sees at least as many as internal,
+        # internal at least as many as portal, and portal is strictly
+        # smaller than internal (one-model default vs all-three).
+        assert counts["admin"] >= counts["internal"]
+        assert counts["internal"] > counts["portal"]
+        assert counts["portal"] == 1
+
+    async def test_portal_models_yaml_override(self) -> None:
+        """A ``portal_models`` YAML entry overrides the tight default."""
+        from tests.unit.tools.conftest import make_auth_result
+
+        custom_ma = ModelAccessConfig(
+            default_policy="allow",
+            stock_models={
+                "full_crud": ["res.partner", "sale.order"],
+            },
+            portal_models=["res.partner", "sale.order"],
+        )
+        gateway = make_gateway(
+            model_access_config=custom_ma,
+            auth_result=make_auth_result(
+                is_admin=False,
+                groups=[],
+                group_xml_ids=["base.group_portal"],
+            ),
+        )
+        gateway.model_registry._models = {
+            "res.partner": ModelInfo(
+                name="res.partner",
+                description="Contact",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+            "sale.order": ModelInfo(
+                name="sale.order",
+                description="Order",
+                is_custom=False,
+                is_transient=False,
+                module="sale",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+        }
+        gateway._models_discovered = True
+        tools = _get_tools(gateway)
+        resp = await tools["list_models"]()
+        names = {m["model"] for m in resp["models"]}
+        # YAML override → portal user sees BOTH models.
+        assert names == {"res.partner", "sale.order"}
 
     async def test_auto_truncate_above_soft_cap(self) -> None:
         """UAT MED-2 — large model catalogs auto-truncate with a hint."""

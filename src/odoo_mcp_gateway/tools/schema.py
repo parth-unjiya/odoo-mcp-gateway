@@ -8,12 +8,20 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.fastmcp import FastMCP
 
 from odoo_mcp_gateway.core.security import security_gate
+from odoo_mcp_gateway.core.security.rbac import is_portal_user
 from odoo_mcp_gateway.server import (
     _get_auth_manager,
     _get_client,
     get_current_session_key,
 )
 from odoo_mcp_gateway.tools.crud import _validate_model
+
+# UAT M1 / MED-2 (Odoo 18 + 19): Default portal allow-list when YAML
+# doesn't specify ``portal_models``. The tightest meaningful set —
+# portal users can typically read their own ``res.partner`` record
+# via row-level ACL, and not much else. Operators can widen this
+# via ``model_access.yaml::portal_models``.
+_DEFAULT_PORTAL_MODELS: tuple[str, ...] = ("res.partner",)
 
 if TYPE_CHECKING:
     from odoo_mcp_gateway.server import GatewayContext
@@ -99,6 +107,24 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
 
             if not include_custom:
                 models = [m for m in models if not m.is_custom]
+
+            # UAT M1 / MED-2: Portal users see a much tighter list. The
+            # previous code branched only admin vs non-admin, so portal
+            # callers got the same 35-model surface as an internal demo
+            # user — overstating the attack surface (Odoo's row-level
+            # ACL clamps the actual reads to ~0 rows, but listing model
+            # NAMES they cannot use is still misleading).
+            #
+            # This is a UX correction, NOT a security control. Two-layer
+            # security still holds: even if a portal model name leaked
+            # here, the actual read goes through Odoo's ir.rule.
+            if is_portal_user(auth_result):
+                portal_allow_list = (
+                    gateway.gateway_config.model_access.portal_models
+                    or list(_DEFAULT_PORTAL_MODELS)
+                )
+                portal_set = set(portal_allow_list)
+                models = [m for m in models if m.name in portal_set]
 
             total = len(models)
             truncated = False

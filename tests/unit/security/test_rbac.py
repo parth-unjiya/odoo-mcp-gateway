@@ -330,3 +330,68 @@ class TestGetVisibleFields:
         # model_access sensitive_fields still applies regardless of group
         assert result is not None
         assert "wage" in result
+
+
+# ── is_portal_user ─────────────────────────────────────────────────
+
+
+class TestIsPortalUser:
+    """UAT M1 / MED-2 — recognise portal/external users for tighter RBAC."""
+
+    def _result(self, **overrides):  # type: ignore[no-untyped-def]
+        from odoo_mcp_gateway.client.base import AuthResult
+
+        defaults = {
+            "uid": 7,
+            "session_id": "sess",
+            "user_context": {},
+            "is_admin": False,
+            "groups": [],
+            "username": "portal_test",
+            "database": "db",
+            "group_xml_ids": [],
+        }
+        defaults.update(overrides)
+        return AuthResult(**defaults)
+
+    def test_none_is_not_portal(self) -> None:
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        assert is_portal_user(None) is False
+
+    def test_admin_is_not_portal(self) -> None:
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        ar = self._result(is_admin=True, group_xml_ids=["base.group_system"])
+        assert is_portal_user(ar) is False
+
+    def test_empty_group_set_is_portal(self) -> None:
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        ar = self._result(group_xml_ids=[])
+        assert is_portal_user(ar) is True
+
+    def test_portal_only_group_is_portal(self) -> None:
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        ar = self._result(group_xml_ids=["base.group_portal"])
+        assert is_portal_user(ar) is True
+
+    def test_public_only_group_is_portal(self) -> None:
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        ar = self._result(group_xml_ids=["base.group_public"])
+        assert is_portal_user(ar) is True
+
+    def test_internal_user_is_not_portal(self) -> None:
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        ar = self._result(group_xml_ids=["base.group_user"])
+        assert is_portal_user(ar) is False
+
+    def test_mixed_portal_plus_internal_is_not_portal(self) -> None:
+        """Any internal group classifies the user as internal, NOT portal."""
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        ar = self._result(group_xml_ids=["base.group_portal", "base.group_user"])
+        assert is_portal_user(ar) is False
