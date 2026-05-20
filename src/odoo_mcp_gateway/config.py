@@ -60,6 +60,20 @@ class Settings(BaseSettings):
     # forge XFF and trivially defeat rate limiting.
     trust_proxy: bool = False
 
+    # ── Observability auth (/metrics) ────────────────────────────────
+    # The ``/metrics`` endpoint exposes operational counters and is
+    # NOT safe to serve unauthenticated to the open internet — it
+    # leaks login-success/failure rates, RPC error counts, circuit-
+    # breaker state, and other side-channel information attackers
+    # routinely use to time scrapers. The default is secure-on:
+    # require a bearer token. Operators who run /metrics behind their
+    # own network ACL can flip ``metrics_require_auth=false``.
+    #
+    # /health and /ready stay unauthenticated — they're load-balancer
+    # probes and intentionally PII-clean.
+    metrics_token: SecretStr | None = None
+    metrics_require_auth: bool = True
+
     # ── Validators ───────────────────────────────────────────────────
 
     @field_validator("odoo_url")

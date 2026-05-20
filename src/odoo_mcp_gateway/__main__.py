@@ -69,6 +69,15 @@ async def _run_streamable_http(server: FastMCP, settings: Settings) -> None:
     # (empty) registry here.
     metrics_registry = gateway.metrics if gateway is not None else MetricsRegistry()
     metrics_route = build_metrics_route(metrics_registry)
+    # Audit fix #2: /metrics MUST require auth in the default config
+    # because the counters leak login success/failure rates, circuit-
+    # breaker state, and other side-channel info attackers routinely
+    # use. The wrapper is a no-op when the operator opts out via
+    # MCP_METRICS_REQUIRE_AUTH=false (e.g. when /metrics is fenced by
+    # an external network ACL).
+    from odoo_mcp_gateway.core.observability.metrics_auth import wrap_metrics_route
+
+    metrics_route = wrap_metrics_route(metrics_route, settings)
     if metrics_route is not None:
         starlette_app.router.routes.append(metrics_route)
         # Stash on the server for diagnostic introspection in tests.
