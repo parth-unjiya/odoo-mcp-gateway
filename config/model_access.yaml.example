@@ -44,8 +44,6 @@ stock_models:
     - hr.leave.type
     - hr.leave.allocation
     - helpdesk.ticket
-    - helpdesk.team
-    - helpdesk.stage
     # Accounting (typically requires account.group_account_user
     # or account.group_account_invoice — see rbac.yaml for tool
     # gating, ir.model.access is the ultimate enforcer in Odoo)
@@ -79,6 +77,19 @@ stock_models:
     - product.supplierinfo
     - hr.job
     - hr.work.location
+    # ── Workflow discovery: stage / team structural records ──────
+    # These are operator-managed structural records that drive the
+    # ``update_task_stage`` / ``update_ticket_stage`` workflow tools.
+    # Callers need read access to discover valid stage IDs for a
+    # given task / team, but writes to these records are an
+    # administrative concern (creating stages, renaming kanban
+    # columns) that does not belong on the MCP surface. UAT MED-1
+    # (Odoo 19) flagged that without these in the registry, the
+    # workflow tools required ``stage_id`` parameters that callers
+    # had no way to discover through the gateway alone.
+    - project.task.type     # Task kanban stages (project.task.type)
+    - helpdesk.stage        # Helpdesk ticket stages
+    - helpdesk.team         # Helpdesk teams (scoping stages + SLAs)
 
   # Admin-only access (requires base.group_system)
   # NOTE: res.users, ir.attachment, payment.token, payment.provider, etc.
