@@ -74,6 +74,29 @@ class Settings(BaseSettings):
     metrics_token: SecretStr | None = None
     metrics_require_auth: bool = True
 
+    # ── OAuth 2.1 (ADR-005) ──────────────────────────────────────────
+    # All four settings are optional and default to the v0.2.x
+    # behaviour (opaque-token-only). When ``oauth_enabled=true`` the
+    # gateway ALSO accepts IdP-issued JWTs alongside the gateway's
+    # own opaque login tokens — a CompositeTokenVerifier delegates
+    # to both. ``oauth_issuer`` and ``oauth_audience`` MUST be set
+    # when ``oauth_enabled=true``; the gateway fails fast at startup
+    # if they aren't.
+    #
+    # ``oauth_jwks_uri`` is optional — when omitted, the gateway
+    # derives it from the issuer as ``<issuer>/.well-known/jwks.json``
+    # (the OIDC discovery convention). Some IdPs (notably Keycloak)
+    # publish their JWKS under a non-default path; in that case set
+    # ``oauth_jwks_uri`` explicitly.
+    #
+    # ``oauth_required_scopes`` is a comma-separated list. Tokens
+    # missing all of these are rejected with insufficient_scope.
+    oauth_enabled: bool = False
+    oauth_issuer: str | None = None
+    oauth_audience: str | None = None
+    oauth_jwks_uri: str | None = None
+    oauth_required_scopes: str | None = None
+
     # ── Validators ───────────────────────────────────────────────────
 
     @field_validator("odoo_url")

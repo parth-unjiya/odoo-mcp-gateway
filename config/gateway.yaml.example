@@ -39,6 +39,32 @@ auth:
     - password
   required_group: ""          # e.g. "base.group_user" to restrict
 
+  # OAuth 2.1 (ADR-005). Optional — set OAUTH_ENABLED=true to accept
+  # IdP-issued JWTs alongside the gateway's own opaque login tokens.
+  # When enabled, OAUTH_ISSUER and OAUTH_AUDIENCE are REQUIRED; the
+  # gateway fails fast at startup if they're missing.
+  oauth:
+    enabled: false                                # MCP_OAUTH_ENABLED
+    issuer: ""                                    # e.g. "https://keycloak.example.com/realms/odoo-mcp"
+    audience: ""                                  # e.g. "https://mcp.example.com/"
+    jwks_uri: ""                                  # optional; defaults to "<issuer>/.well-known/jwks.json"
+    required_scopes: ""                           # comma-separated, e.g. "odoo.read,odoo.write"
+
 rate_limit:
   global_per_minute: 60
   write_per_minute: 20
+
+# Reverse-proxy trust. SECURITY: only enable when the gateway is
+# actually behind a trusted proxy that overwrites X-Forwarded-For.
+# Otherwise any caller can forge XFF and trivially defeat per-IP
+# rate limiting on the login tool.
+http:
+  trust_proxy: false                              # MCP_TRUST_PROXY
+
+# /metrics auth. Secure-by-default ON: scrapes must present
+# "Authorization: Bearer <metrics_token>". Operators behind a network
+# ACL can opt out by setting MCP_METRICS_REQUIRE_AUTH=false.
+# /health and /ready stay anonymous — they're load-balancer probes.
+observability:
+  metrics_require_auth: true                      # MCP_METRICS_REQUIRE_AUTH
+  metrics_token: ""                               # MCP_METRICS_TOKEN (SecretStr)

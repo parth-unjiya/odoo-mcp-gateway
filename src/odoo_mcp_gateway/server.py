@@ -32,6 +32,18 @@ from odoo_mcp_gateway.core.version.adapters import VersionAdapter
 
 logger = logging.getLogger(__name__)
 
+
+class ConfigurationError(Exception):
+    """Raised at startup when settings are inconsistent or incomplete.
+
+    Specifically used by ``_build_fastmcp`` when OAuth is enabled but
+    the operator forgot to set ``oauth_issuer`` / ``oauth_audience``.
+    Failing fast at server construction time is the right shape: the
+    container restart loop will surface the misconfiguration to the
+    operator instantly, rather than silently degrading to opaque-only
+    auth.
+    """
+
 # ContextVar for per-request session isolation in HTTP mode.
 #
 # WARNING: HTTP mode (streamable-http transport) currently has KNOWN session
@@ -415,11 +427,73 @@ def _build_fastmcp(settings: Settings, gateway: GatewayContext) -> FastMCP:
 
     from odoo_mcp_gateway.core.auth.token_verifier import OdooTokenVerifier
 
-    # Self-referential issuer URL for Sprint 1 (opaque-token mode).
-    # When OAuth lands in ADR-005, the issuer becomes the IdP's URL.
+    # Self-referential issuer URL for the opaque-token path.
+    # When OAuth is enabled below we override this with the real IdP.
     gateway_url = f"http://{settings.mcp_host}:{settings.mcp_port}/"
+
+    # Always wire the opaque verifier so the gateway's own login-issued
+    # bearer tokens continue to work. When OAuth is enabled we COMPOSE
+    # (rather than replace), letting one deployment accept both the
+    # gateway's opaque tokens AND IdP-issued JWTs — see ADR-005.
+    opaque_verifier = OdooTokenVerifier(gateway)
+    token_verifier: Any = opaque_verifier
+    issuer_url = gateway_url
+
+    if settings.oauth_enabled:
+        if not settings.oauth_issuer or not settings.oauth_audience:
+            raise ConfigurationError(
+                "OAUTH_ENABLED=true but OAUTH_ISSUER and/or OAUTH_AUDIENCE "
+                "are missing. Set both env vars (or settings) before "
+                "starting the gateway with OAuth enabled."
+            )
+
+        from odoo_mcp_gateway.core.auth.oauth_verifier import (
+            CompositeTokenVerifier,
+            OAuthJwtVerifier,
+        )
+
+        # Derive the JWKS URI from the issuer when not set explicitly.
+        # OIDC discovery convention is "<issuer>/.well-known/jwks.json"
+        # though some IdPs (e.g. Keycloak) publish under different
+        # paths — operators override via oauth_jwks_uri in that case.
+        jwks_uri = settings.oauth_jwks_uri or (
+            settings.oauth_issuer.rstrip("/") + "/.well-known/jwks.json"
+        )
+
+        required_scopes_list: list[str] | None = None
+        if settings.oauth_required_scopes:
+            # Comma-separated env var → list. Strip whitespace + drop
+            # empty entries so a trailing comma doesn't produce a
+            # falsy scope entry the verifier would then never match.
+            parsed = [
+                s.strip()
+                for s in settings.oauth_required_scopes.split(",")
+                if s.strip()
+            ]
+            required_scopes_list = parsed or None
+
+        oauth_verifier = OAuthJwtVerifier(
+            gateway=gateway,
+            issuer=settings.oauth_issuer,
+            audience=settings.oauth_audience,
+            jwks_uri=jwks_uri,
+            required_scopes=required_scopes_list,
+        )
+
+        # Opaque-first ordering is intentional: opaque tokens fail
+        # fast (single dict lookup) so JWT-shaped tokens fall through
+        # quickly. The composite returns the FIRST validator that
+        # accepts the token.
+        token_verifier = CompositeTokenVerifier([opaque_verifier, oauth_verifier])
+
+        # When OAuth is enabled the issuer URL advertised in the PRM
+        # document MUST be the IdP's issuer (not our self-referential
+        # gateway URL). This is what makes RFC 8707 audience binding
+        # work end-to-end.
+        issuer_url = settings.oauth_issuer
+
     auth_settings = AuthSettings(
-        issuer_url=gateway_url,  # type: ignore[arg-type]
+        issuer_url=issuer_url,  # type: ignore[arg-type]
         resource_server_url=gateway_url,  # type: ignore[arg-type]
         required_scopes=["odoo.session"],
     )
@@ -428,7 +502,7 @@ def _build_fastmcp(settings: Settings, gateway: GatewayContext) -> FastMCP:
         host=settings.mcp_host,
         port=settings.mcp_port,
         auth=auth_settings,
-        token_verifier=OdooTokenVerifier(gateway),
+        token_verifier=token_verifier,
     )
 
 
