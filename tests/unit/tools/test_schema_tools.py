@@ -356,3 +356,146 @@ class TestGetModelFields:
 
         assert resp["model"] == "sale.order"
         assert resp["count"] == 1
+
+
+# ------------------------------------------------------------------
+# UAT MED-1 (Odoo 17) — field_filter accepts list or CSV string
+# ------------------------------------------------------------------
+
+
+class TestGetModelFieldsFilterListShapes:
+    """Verify ``field_filter`` accepts CSV strings, lists, and single names.
+
+    The Odoo 17 UAT caught that the old code substring-matched against
+    field names AND labels, so ``"name,phone,email"`` (a CSV) matched
+    nothing — no field name contains a comma. The current contract is:
+
+    * CSV or list   → exact-name match (subset returned)
+    * Single token  → legacy substring match (back-compat)
+    * Empty / None  → no filter
+    """
+
+    @staticmethod
+    def _gateway_with_partner_fields() -> Any:
+        mock_client = make_mock_client()
+        gateway = make_gateway(mock_client=mock_client)
+        gateway.field_inspector._cache["res.partner"] = (
+            999999999.0,
+            {
+                "name": FieldInfo(name="name", field_type="char", string="Name"),
+                "phone": FieldInfo(name="phone", field_type="char", string="Phone"),
+                "email": FieldInfo(name="email", field_type="char", string="Email"),
+                "is_company": FieldInfo(
+                    name="is_company", field_type="boolean", string="Is Company"
+                ),
+                "country_id": FieldInfo(
+                    name="country_id", field_type="many2one", string="Country"
+                ),
+                "vat": FieldInfo(name="vat", field_type="char", string="VAT"),
+            },
+        )
+        return gateway
+
+    async def test_csv_string_returns_named_subset(self) -> None:
+        gateway = self._gateway_with_partner_fields()
+        tools = _get_tools(gateway)
+        resp = await tools["get_model_fields"](
+            model="res.partner",
+            field_filter="name,phone,email,is_company,country_id",
+        )
+        assert set(resp["fields"].keys()) == {
+            "name",
+            "phone",
+            "email",
+            "is_company",
+            "country_id",
+        }
+        assert resp["count"] == 5
+        # The unrequested field MUST NOT appear.
+        assert "vat" not in resp["fields"]
+
+    async def test_list_of_names_returns_subset(self) -> None:
+        gateway = self._gateway_with_partner_fields()
+        tools = _get_tools(gateway)
+        resp = await tools["get_model_fields"](
+            model="res.partner",
+            field_filter=["name", "country_id"],
+        )
+        assert set(resp["fields"].keys()) == {"name", "country_id"}
+
+    async def test_single_token_substring_legacy_behaviour(self) -> None:
+        """Single-token strings keep the legacy substring match."""
+        gateway = self._gateway_with_partner_fields()
+        tools = _get_tools(gateway)
+        # "company" is a substring of "is_company" — substring match wins.
+        resp = await tools["get_model_fields"](
+            model="res.partner",
+            field_filter="company",
+        )
+        assert "is_company" in resp["fields"]
+        assert "name" not in resp["fields"]
+
+    async def test_empty_string_returns_all(self) -> None:
+        gateway = self._gateway_with_partner_fields()
+        tools = _get_tools(gateway)
+        resp = await tools["get_model_fields"](
+            model="res.partner",
+            field_filter="",
+        )
+        # All six accessible fields visible.
+        assert resp["count"] == 6
+
+    async def test_none_returns_all(self) -> None:
+        gateway = self._gateway_with_partner_fields()
+        tools = _get_tools(gateway)
+        resp = await tools["get_model_fields"](
+            model="res.partner",
+            field_filter=None,
+        )
+        assert resp["count"] == 6
+
+    async def test_nonexistent_names_silently_dropped(self) -> None:
+        """Tokens for fields that don't exist on the model are simply ignored.
+
+        No error is raised; the response contains the subset that does
+        exist. Empty if none of the supplied names exist.
+        """
+        gateway = self._gateway_with_partner_fields()
+        tools = _get_tools(gateway)
+        resp = await tools["get_model_fields"](
+            model="res.partner",
+            field_filter="name,no_such_field,country_id,also_missing",
+        )
+        assert set(resp["fields"].keys()) == {"name", "country_id"}
+
+    async def test_filter_intersects_with_rbac_redaction(self) -> None:
+        """Caller-supplied name MUST NOT bypass RBAC field redaction."""
+        rbac_config = RBACConfig(
+            sensitive_fields={
+                "res.partner": {
+                    "required_group": "hr.group_hr_manager",
+                    "fields": ["vat"],
+                },
+            },
+        )
+        mock_client = make_mock_client()
+        gateway = make_gateway(
+            rbac_config=rbac_config,
+            mock_client=mock_client,
+            user_groups=["base.group_user"],
+        )
+        gateway.field_inspector._cache["res.partner"] = (
+            999999999.0,
+            {
+                "name": FieldInfo(name="name", field_type="char", string="Name"),
+                "vat": FieldInfo(name="vat", field_type="char", string="VAT"),
+            },
+        )
+        tools = _get_tools(gateway)
+        resp = await tools["get_model_fields"](
+            model="res.partner",
+            field_filter="name,vat",
+        )
+        # ``vat`` is redacted by RBAC even though the caller asked for it.
+        assert "name" in resp["fields"]
+        assert "vat" not in resp["fields"]

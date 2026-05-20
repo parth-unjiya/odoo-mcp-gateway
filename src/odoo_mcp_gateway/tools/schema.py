@@ -88,10 +88,29 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
     @server.tool()
     async def get_model_fields(
         model: str,
-        field_filter: str = "",
+        field_filter: list[str] | str | None = None,
         include_readonly: bool = True,
     ) -> dict[str, Any]:
-        """Get field definitions for an Odoo model."""
+        """Get field definitions for an Odoo model.
+
+        ``field_filter`` accepts THREE shapes:
+
+        * ``None`` or empty string → no filter; every accessible field
+          is returned.
+        * Single string without commas (e.g. ``"email"``) → substring
+          match against both the field name and its label (legacy
+          behaviour preserved for back-compat).
+        * Comma-separated string (e.g. ``"name,phone,email"``) OR a
+          ``list[str]`` of names → EXACT field-name match. Each token
+          is stripped + lowercased. Tokens that don't exist on the
+          model are silently dropped — the response contains the
+          subset that does exist; no error is raised.
+
+        The filter composes WITH (intersects) the RBAC/restriction
+        layer: a field that RBAC redacts is never returned, even if
+        the caller explicitly named it. This preserves the two-layer
+        security contract.
+        """
         try:
             model = _validate_model(model)
             client = _get_client(gateway)
@@ -125,18 +144,62 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 is_admin,
             )
 
+            # Normalise the filter into one of:
+            #   * ``None``                 → no filter
+            #   * ``("substring", str)``   → legacy single-token match
+            #   * ``("names", set[str])``  → exact-name list match
+            #
+            # The UAT MED-1 finding caught the previous code path: a CSV
+            # like ``"name,phone,email,is_company,country_id"`` was
+            # substring-matched against every field name AND every
+            # field label. No field NAME or label contains a comma, so
+            # every field was filtered out and the response was empty.
+            # We now detect the list shape (literal list, or string
+            # containing a comma) and switch to exact-name matching.
+            filter_mode: tuple[str, Any] | None = None
+            if isinstance(field_filter, list):
+                names = {
+                    str(n).strip().lower()
+                    for n in field_filter
+                    if isinstance(n, str) and n.strip()
+                }
+                if names:
+                    filter_mode = ("names", names)
+            elif isinstance(field_filter, str):
+                raw = field_filter.strip()
+                if raw:
+                    if "," in raw:
+                        names = {
+                            tok.strip().lower()
+                            for tok in raw.split(",")
+                            if tok.strip()
+                        }
+                        if names:
+                            filter_mode = ("names", names)
+                    else:
+                        # Cap pathological single-token inputs at 256 chars
+                        # to match the prior bound and avoid quadratic
+                        # substring scans on absurd input.
+                        filter_mode = ("substring", raw.lower()[:256])
+
             result: dict[str, Any] = {}
-            filter_lower = field_filter.strip().lower()[:256] if field_filter else ""
             for fname, finfo in fields.items():
                 if not include_readonly and finfo.readonly:
                     continue
-                if filter_lower:
-                    if (
-                        filter_lower not in fname.lower()
-                        and filter_lower not in (finfo.string or "").lower()
-                    ):
-                        continue
-                # If redact_fields is not None, it contains fields to hide
+                if filter_mode is not None:
+                    mode, value = filter_mode
+                    if mode == "substring":
+                        if (
+                            value not in fname.lower()
+                            and value not in (finfo.string or "").lower()
+                        ):
+                            continue
+                    else:  # mode == "names"
+                        if fname.lower() not in value:
+                            continue
+                # If redact_fields is not None, it contains fields to hide.
+                # RBAC redaction wins over an explicit caller-supplied name:
+                # the two-layer security contract requires it.
                 if redact_fields is not None and fname in redact_fields:
                     continue
 
