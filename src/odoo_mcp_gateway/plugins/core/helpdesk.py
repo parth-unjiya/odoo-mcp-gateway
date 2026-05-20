@@ -273,12 +273,21 @@ class HelpdeskPlugin(OdooPlugin):
                 if isinstance(restriction_msg, str):
                     return {"error": restriction_msg}
 
-                # IDOR protection: scope to current user unless admin
+                # UAT HIGH-1: previously the lookup added
+                # ``["user_id", "=", uid]`` for non-admin callers, masking
+                # any ticket the user could read via ``search_read`` (e.g.
+                # a helpdesk_manager managing tickets they didn't own) as
+                # "Ticket not found". That contradicted Odoo's own ACL
+                # surface and gave a confusing 404-style error to a user
+                # whose role legitimately allowed the operation.
+                #
+                # We now defer entirely to Odoo's ``ir.rule`` for read
+                # visibility: if ``search_read`` returns the record, the
+                # caller has read access. If the subsequent ``write``
+                # fails due to a write-ACL restriction, Odoo's error is
+                # surfaced verbatim (post-sanitisation) rather than
+                # masked as a not-found.
                 domain: list[Any] = [["id", "=", ticket_id]]
-                if not is_admin:
-                    domain.append(["user_id", "=", uid])
-
-                # Verify ticket exists and belongs to user
                 tickets = await client.execute_kw(
                     _TICKET_MODEL,
                     "search_read",

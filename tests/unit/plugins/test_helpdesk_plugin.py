@@ -416,39 +416,85 @@ def admin_helpdesk_tools(admin_helpdesk_context):
     return _register_helpdesk(ctx)
 
 
-class TestIDORProtection:
-    """Verify user_id scoping prevents cross-user access in update_ticket_stage."""
+class TestUpdateTicketStageAclScope:
+    """UAT HIGH-1 — defer ticket visibility to Odoo's ir.rule.
 
-    async def test_nonadmin_update_ticket_stage_includes_user_id_in_domain(
+    The previous implementation added ``["user_id", "=", uid]`` to the
+    search_read domain for non-admin callers, which is strictly narrower
+    than Odoo's row-level ACL. A helpdesk_manager who could read a ticket
+    (because their group's ir.rule grants team-wide visibility) but did
+    not own it got "Ticket not found" — a misleading 404 for an operation
+    the role was authorised to perform. The fix removes the clamp and
+    trusts Odoo's ir.rule for read visibility; subsequent write failures
+    surface Odoo's own write-ACL error.
+    """
+
+    async def test_nonadmin_update_ticket_stage_no_user_id_clamp(
         self, nonadmin_helpdesk_tools, nonadmin_helpdesk_context
     ):
-        """Non-admin update_ticket_stage must include user_id filter in domain."""
+        """The search domain must not narrow below ``["id", "=", ticket_id]``."""
         _, client = nonadmin_helpdesk_context
         client.execute_kw.side_effect = [
             [{"id": 5, "name": "Bug report", "stage_id": [1, "New"]}],
             True,  # write
         ]
         await nonadmin_helpdesk_tools["update_ticket_stage"](ticket_id=5, stage_id=3)
-        # First execute_kw call is the ticket verification search
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
-        assert ["user_id", "=", 42] in domain
+        # No ``user_id`` clamp — Odoo's ir.rule is now the sole gate.
+        assert all(
+            not (isinstance(d, list) and d[0] == "user_id") for d in domain
+        )
+        assert ["id", "=", 5] in domain
 
-    async def test_admin_update_ticket_stage_does_not_include_user_id_in_domain(
+    async def test_admin_update_ticket_stage_uses_id_only_domain(
         self, admin_helpdesk_tools, admin_helpdesk_context
     ):
-        """Admin update_ticket_stage must NOT include user_id filter in domain."""
+        """Admin behaviour unchanged — domain is still id-only."""
         _, client = admin_helpdesk_context
         client.execute_kw.side_effect = [
             [{"id": 5, "name": "Bug report", "stage_id": [1, "New"]}],
-            True,  # write
+            True,
         ]
         await admin_helpdesk_tools["update_ticket_stage"](ticket_id=5, stage_id=3)
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
         assert ["id", "=", 5] in domain
-        # user_id filter must NOT be present for admin
-        user_id_entries = [
-            d for d in domain if isinstance(d, list) and d[0] == "user_id"
+        assert all(
+            not (isinstance(d, list) and d[0] == "user_id") for d in domain
+        )
+
+    async def test_manager_can_update_ticket_owned_by_other_user(
+        self, nonadmin_helpdesk_tools, nonadmin_helpdesk_context
+    ):
+        """Manager (non-assignee) can transition a ticket they can read."""
+        ctx, client = nonadmin_helpdesk_context
+        # The non-admin manager has read access to ticket 11 via ir.rule
+        # (Odoo returns the record from search_read) AND write succeeds.
+        client.execute_kw.side_effect = [
+            [{"id": 11, "name": "Help me", "stage_id": [1, "New"]}],
+            True,  # write succeeds
         ]
-        assert len(user_id_entries) == 0
+        result = await nonadmin_helpdesk_tools["update_ticket_stage"](
+            ticket_id=11, stage_id=2
+        )
+        assert result.get("status") == "updated"
+        assert result.get("ticket_id") == 11
+        assert result.get("new_stage_id") == 2
+
+    async def test_write_acl_error_surfaces_verbatim_not_404(
+        self, nonadmin_helpdesk_tools, nonadmin_helpdesk_context
+    ):
+        """If Odoo allows read but denies write, surface the write error."""
+        ctx, client = nonadmin_helpdesk_context
+        # Search succeeds (read ACL passes); write raises an ACL error.
+        client.execute_kw.side_effect = [
+            [{"id": 14, "name": "Other team ticket", "stage_id": [1, "New"]}],
+            Exception("AccessError: You are not allowed to write"),
+        ]
+        result = await nonadmin_helpdesk_tools["update_ticket_stage"](
+            ticket_id=14, stage_id=2
+        )
+        # Surface the Odoo-side error (post-sanitisation), not "not found".
+        assert result.get("error") is not None
+        assert "Ticket not found" not in result["error"]

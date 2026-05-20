@@ -329,12 +329,18 @@ class ProjectPlugin(OdooPlugin):
                 if isinstance(restriction_msg, str):
                     return {"error": restriction_msg}
 
-                # IDOR protection: scope to current user unless admin
+                # UAT HIGH-1 (parity with update_ticket_stage): the
+                # previous ``["user_ids", "in", [uid]]`` clamp for
+                # non-admin callers was strictly narrower than Odoo's
+                # ``ir.rule`` for project.task, so a project_manager who
+                # could read a task via ``search_read`` could not move
+                # its stage — surfacing as "Task not found", which is
+                # misleading. Defer to Odoo's ACL: if ``search_read``
+                # returns the row, the caller has read access; if the
+                # subsequent ``write`` is denied by ir.model.access /
+                # ir.rule, Odoo's own write-ACL error is surfaced
+                # (post-sanitisation) rather than masked as a 404.
                 domain: list[Any] = [["id", "=", task_id]]
-                if not is_admin:
-                    domain.append(["user_ids", "in", [uid]])
-
-                # Verify task exists and belongs to user
                 tasks = await client.execute_kw(
                     "project.task",
                     "search_read",

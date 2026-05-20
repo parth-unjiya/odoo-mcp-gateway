@@ -328,42 +328,85 @@ def admin_project_tools(admin_project_context):
     return _register_project(ctx)
 
 
-class TestIDORProtection:
-    """Verify user_ids scoping prevents cross-user access in update_task_stage."""
+class TestUpdateTaskStageAclScope:
+    """UAT HIGH-1 (parity with helpdesk) — defer task visibility to ir.rule.
 
-    async def test_nonadmin_update_task_stage_includes_user_ids_in_domain(
+    The previous implementation clamped non-admin callers to ``user_ids in
+    [uid]``, which is strictly narrower than Odoo's row-level ACL for
+    ``project.task``. A project_manager who could read a task via
+    ``search_read`` (because their group's ir.rule grants project-wide
+    visibility) but did not have it assigned got "Task not found" — a
+    misleading 404 for an operation the role was authorised to perform.
+    The fix removes the clamp and trusts Odoo's ir.rule.
+
+    Note: ``get_project_summary`` keeps its scoping (see the dedicated
+    summary tests below). Only the stage-transition path was flagged as
+    narrower than the ACL surface.
+    """
+
+    async def test_nonadmin_update_task_stage_no_user_ids_clamp(
         self, nonadmin_project_tools, nonadmin_project_context
     ):
-        """Non-admin update_task_stage must include user_ids filter in domain."""
+        """Search domain must not narrow below ``["id", "=", task_id]``."""
         _, client = nonadmin_project_context
         client.execute_kw.side_effect = [
             [{"id": 10, "name": "Fix bug", "stage_id": [1, "To Do"]}],
-            True,  # write
+            True,
         ]
         await nonadmin_project_tools["update_task_stage"](task_id=10, stage_id=2)
-        # First execute_kw call is the task verification search
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
-        assert ["user_ids", "in", [42]] in domain
+        assert all(
+            not (isinstance(d, list) and d[0] == "user_ids") for d in domain
+        )
+        assert ["id", "=", 10] in domain
 
-    async def test_admin_update_task_stage_does_not_include_user_ids_in_domain(
+    async def test_admin_update_task_stage_uses_id_only_domain(
         self, admin_project_tools, admin_project_context
     ):
-        """Admin update_task_stage must NOT include user_ids filter in domain."""
         _, client = admin_project_context
         client.execute_kw.side_effect = [
             [{"id": 10, "name": "Fix bug", "stage_id": [1, "To Do"]}],
-            True,  # write
+            True,
         ]
         await admin_project_tools["update_task_stage"](task_id=10, stage_id=2)
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
         assert ["id", "=", 10] in domain
-        # user_ids filter must NOT be present for admin
         user_ids_entries = [
             d for d in domain if isinstance(d, list) and d[0] == "user_ids"
         ]
-        assert len(user_ids_entries) == 0
+        assert user_ids_entries == []
+
+    async def test_manager_can_update_task_not_assigned_to_them(
+        self, nonadmin_project_tools, nonadmin_project_context
+    ):
+        """A project_manager who can read a task via ir.rule can move it."""
+        _, client = nonadmin_project_context
+        client.execute_kw.side_effect = [
+            [{"id": 77, "name": "Other person's task", "stage_id": [1, "To Do"]}],
+            True,
+        ]
+        result = await nonadmin_project_tools["update_task_stage"](
+            task_id=77, stage_id=4
+        )
+        assert result.get("status") == "updated"
+        assert result.get("task_id") == 77
+        assert result.get("new_stage_id") == 4
+
+    async def test_task_stage_write_acl_error_surfaces_verbatim(
+        self, nonadmin_project_tools, nonadmin_project_context
+    ):
+        _, client = nonadmin_project_context
+        client.execute_kw.side_effect = [
+            [{"id": 80, "name": "Read OK", "stage_id": [1, "To Do"]}],
+            Exception("AccessError: write denied"),
+        ]
+        result = await nonadmin_project_tools["update_task_stage"](
+            task_id=80, stage_id=4
+        )
+        assert result.get("error") is not None
+        assert "Task not found" not in result["error"]
 
     async def test_nonadmin_get_project_summary_scopes_project_and_tasks(
         self, nonadmin_project_tools, nonadmin_project_context
