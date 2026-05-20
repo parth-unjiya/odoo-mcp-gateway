@@ -20,7 +20,12 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip setuptools wheel
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # Install ALL extras so the v0.3.0 observability + OAuth code
+        # paths are exercised under the unit tests + lint + mypy.
+        # Without the extras, `pip-audit` would also miss vulns in
+        # `authlib` / `prometheus-client` / `opentelemetry-*` that
+        # production deployments will see.
+        run: pip install -e ".[dev,observability,oauth]"
       - name: Ruff check
         run: ruff check src/ tests/
       - name: Ruff format check
@@ -41,7 +46,12 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip setuptools wheel
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # Install ALL extras so the v0.3.0 observability + OAuth code
+        # paths are exercised under the unit tests + lint + mypy.
+        # Without the extras, `pip-audit` would also miss vulns in
+        # `authlib` / `prometheus-client` / `opentelemetry-*` that
+        # production deployments will see.
+        run: pip install -e ".[dev,observability,oauth]"
       - name: Run tests with coverage
         run: pytest tests/ -v --tb=short --cov=odoo_mcp_gateway --cov-report=xml --cov-fail-under=90
       - name: Upload coverage
@@ -60,7 +70,12 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip setuptools wheel
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # Install ALL extras so the v0.3.0 observability + OAuth code
+        # paths are exercised under the unit tests + lint + mypy.
+        # Without the extras, `pip-audit` would also miss vulns in
+        # `authlib` / `prometheus-client` / `opentelemetry-*` that
+        # production deployments will see.
+        run: pip install -e ".[dev,observability,oauth]"
       - name: Check for security issues
         run: pip install bandit==1.7.7 && bandit -r src/ -ll -ii
       - name: Audit production dependencies

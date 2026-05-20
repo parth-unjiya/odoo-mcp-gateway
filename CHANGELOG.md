@@ -5,6 +5,134 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-20
+
+Major release — enterprise multi-user HTTP transport, OAuth 2.1 bearer auth, Plugin SDK 1.0, observability stack, and 8 new MCP-spec capabilities. **Strict backward-compat**: every v0.2.x stdio user upgrades with **zero config changes**.
+
+### Highlights
+
+- **Streamable HTTP transport** with bearer-token auth, per-request session middleware via ContextVar + ASGI, and `asyncio.Lock`-serialised session swaps.
+- **OAuth 2.1 (additive)** — IdP-issued JWT validation via `authlib`, email-claim → `res.users.login` mapping, 5-scope intersection, JWKS TTL cache.
+- **Plugin SDK 1.0** — typed `Protocol` + 7 lifecycle hooks + version compat range (`plugin_sdk_version`) with two-tier policy (same-major warn, different-major refuse).
+- **Tool annotations** on every tool (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`).
+- **Completions** for model / method / record_id arguments (Odoo discoverability "magic" — no competitor ships this).
+- **Elicitation** on `create_record` when required fields are missing.
+- **Bulk operations** (`bulk_create`, `bulk_update`) — single-transaction-atomic chunks with progress notifications.
+- **Observability stack** — `/health`, `/ready`, `/metrics` (Prometheus), structured JSON logs (structlog), OpenTelemetry tracing with httpx auto-instrumentation.
+- **`domain_builder.validate_domain` rewrite** — ports Odoo's own `normalize_domain` algorithm; rejects malformed inputs the old depth-counter accepted.
+
+### New features (by ADR)
+
+**ADR-001 — HTTP per-request session middleware**
+- `core/auth/middleware.py::SessionResolverMiddleware` projects the MCP SDK's `auth_context_var` into our existing `_current_session_key` ContextVar.
+- `core/auth/token_verifier.py::OdooTokenVerifier` implements the SDK's `TokenVerifier` protocol against `GatewayContext.token_index`.
+- `__main__._run_streamable_http` drives uvicorn directly, mounting our middleware AFTER the SDK's `AuthContextMiddleware`.
+- `_resolve_session_auth_manager` refuses to fall back to a residual session when the contextvar is stale (closes the v0.2.2 TOCTOU class).
+
+**ADR-002 — Bearer token issuance**
+- `GatewayContext.token_index` maps opaque tokens → session_keys. Rotation on re-login; revocation on session eviction or process cleanup.
+- `login` tool response includes `bearer_token` + `token_type` fields. Stdio callers ignore them; HTTP callers send them as `Authorization: Bearer`.
+- Eviction-revokes-tokens prevents dangling tokens from outliving their `AuthManager`.
+
+**ADR-003 — Plugin SDK 1.0**
+- `plugins/sdk.py` — `@runtime_checkable Protocol` (`OdooMcpPlugin`); `PluginContext` facade exposing rbac / restrictions / audit / field_inspector / model_registry / version_adapter; `check_plugin_sdk_compat()` with two-tier failure.
+- `OdooPlugin` ABC upgraded with `plugin_sdk_version` default + 7 lifecycle hooks (no-op defaults): `pre_register`, `post_register`, `pre_call`, `post_call`, `on_session_close`, `on_external_event` (reserved for v0.4.0 webhooks).
+- `PluginRegistry.dispatch_*` methods with per-plugin error isolation — one misbehaving plugin can't crash the dispatch path.
+- 4 built-in plugins (HR / Sales / Project / Helpdesk) declare `plugin_sdk_version = ">=1.0,<2.0"` explicitly.
+- New `docs/PLUGIN_AUTHORING.md` (200-line guide).
+
+**ADR-004 — `domain_builder.validate_domain` rewrite**
+- Ports Odoo's own `normalize_domain` algorithm (LGPL-3, attributed). Single-pass O(n), expected-counter + arity stack.
+- Correctly handles binary `&` / `|` vs unary `!`. Computes true tree depth.
+- **Strict mode**: rejects implicit `&` between unjoined subtrees (Odoo accepts; we don't).
+- `MAX_DOMAIN_DEPTH` lowered from 10 to 8 (every observed legitimate domain is depth ≤ 5).
+- +13 regression tests covering arity violations, operator-only domains, trailing garbage, mixed nesting, valid complex polish-form.
+
+**ADR-005 — OAuth 2.1 additive auth (`[oauth]` extra)**
+- `core/auth/oauth_verifier.py::OAuthJwtVerifier` validates IdP JWTs via `authlib.jose` (RS256 / ES256 only — HS256 prohibited by OAuth 2.1 for public clients).
+- Validates `iss`, `aud == gateway_url`, `exp` with 30s leeway. JWKS cached 10 minutes.
+- Email-claim → `res.users.login` mapping (zero-config for 90% of Odoo deployments).
+- 5-scope hierarchy: `odoo.read / write / delete / workflow / admin`.
+- `CompositeTokenVerifier` chains opaque (Sprint 1) + JWT verifiers for migration deployments.
+- Stdio mode UNCHANGED — OAuth only activates on `streamable-http` with an IdP issuer wired.
+
+**ADR-006 — Observability (`[observability]` extra)**
+- `core/observability/health.py` — `/health` liveness (no external deps) + `/ready` readiness (Odoo-probe TTL-cached at 10s to avoid LB-poll self-DoS).
+- `core/observability/metrics.py` — `MetricsRegistry` with 10 standard counters/histograms/gauges + `/metrics` Prometheus endpoint.
+- `core/observability/tracing.py` — `configure_tracing()` + `tool_span()` with hashed `mcp.session.id` (no raw PII), `odoo.uid`, httpx auto-instrumentation when `opentelemetry-instrumentation-httpx` is installed.
+- `core/observability/structured_logging.py` — `configure_structlog()` with ContextVar auto-injection.
+- Soft-imports throughout — without the extra installed, every observability call is a no-op.
+
+**ADR-007 — Tool annotations**
+- `tools/annotations.py` central per-tool map (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`).
+- `apply_pending_annotations(server)` walks the tool registry once after `create_server` finishes and attaches annotations.
+- Conformance test ensures every registered tool has a map entry — new tools can't ship without annotations.
+
+**ADR-008 — Elicitation on `create_record`**
+- `tools/elicitation.py::detect_missing_required_fields` + `elicit_missing_fields`.
+- `create_record` now accepts optional `ctx: Context`. When required fields are missing, the server elicits them via `elicitation/create`. Clients that don't support elicitation get the standard error.
+- Field schema fetched ONCE per create and shared with `_validate_writable_fields` (no duplicate `fields_get` round-trip).
+
+**ADR-009 — Completions**
+- `core/discovery/completions.py` registers a `completion/complete` handler.
+- `model` / `model_name` args → restriction-filtered list from `ModelRegistry`, prefix-rank above substring; YAML fallback when registry not yet populated.
+- `method` / `action` args → `model_access.yaml::allowed_methods`, narrowed by model context.
+- `record_id` args → syntax hint (no Odoo round-trip per keystroke).
+- Capped at 50 values, exception-safe (typeahead can never crash).
+
+**ADR-010 — Bulk operations**
+- `tools/bulk.py::bulk_create` + `bulk_update` — single-transaction-atomic chunks via Odoo's native `execute_kw(model, 'create', [records])` / `execute_kw(model, 'write', [ids, values])`.
+- Chunks NOT atomic across each other (documented). `chunk_size` default 200, hard cap `_MAX_TOTAL_RECORDS = 5_000`.
+- `bulk_update` dedupes `record_ids` to prevent workload amplification.
+- Partial-state diagnostic on chunk failure (`partial_ids` / `completed_chunks` / `total_chunks`).
+- Progress notifications via `ctx.report_progress(completed, total, message)` per chunk (silent no-op for clients that don't support).
+- Full security pipeline runs per-record — NO shortcuts for batch performance.
+- **Rejected**: `transaction_begin` / `transaction_commit` (would require Odoo-side module).
+
+### Backward compatibility
+
+| Scenario | Migration |
+|---|---|
+| Stdio user on Claude Desktop / Code | **Zero changes.** `pip install --upgrade odoo-mcp-gateway` — bearer_token field appears in login response but is ignored by stdio callers. |
+| HTTP-transport deployment | New: send `Authorization: Bearer <token>` on every request after login. Old session-cookie path no longer needed. |
+| External plugin author | Add `plugin_sdk_version = ">=1.0,<2.0"` to plugin class. Existing `OdooPlugin(ABC)` base still works (default declares this). |
+| YAML configs | All v0.2.x YAML configs work unchanged. OAuth + scope additions are opt-in. |
+
+### New optional dependencies
+
+```toml
+[project.optional-dependencies]
+observability = [
+    "prometheus-client>=0.20",
+    "structlog>=24.1",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-instrumentation-httpx>=0.46b0",
+]
+oauth = [
+    "authlib>=1.6",
+]
+```
+
+Install with `pip install odoo-mcp-gateway[observability,oauth]` for the full stack.
+
+### Tests + quality
+
+- **1,827 tests passing** (1,675 → 1,827, +152 across 6 sprints). Coverage 90.46% (≥90% gate).
+- Ruff check + format + mypy strict all clean across 191 files / 77 source files.
+- Python 3.10, 3.11, 3.12, 3.13 all green in CI matrix.
+
+### Deferred to v0.4.0
+
+- Webhooks (Odoo bus → `notifications/resources/updated` push channel). The `SubscriptionTracker` API surface ships in v0.3.0 so plugin authors can write code against it now.
+- `mcp_field_cache_hits/misses` + `odoo_rpc_duration_seconds` metric wiring — needs gateway-ref plumbing into `FieldInspector` and the RPC clients.
+- Dynamic Client Registration (RFC 7591).
+- Fine-grained per-model OAuth scopes (`odoo.read.sale.order`).
+- "Odoo as OAuth provider" mode.
+- SaaS anonymous multi-tenant (separate product).
+- DXT one-click Claude Desktop install bundle.
+- Async tasks primitive (spec still experimental).
+
 ## [0.2.2] - 2026-05-19
 
 ### Security

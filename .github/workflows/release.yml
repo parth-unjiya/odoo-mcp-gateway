@@ -18,7 +18,9 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip setuptools wheel
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        # Match CI: install all extras so the same code paths
+        # are exercised pre-publish.
+        run: pip install -e ".[dev,observability,oauth]"
       - name: Lint
         run: ruff check src/ tests/
       - name: Format check
