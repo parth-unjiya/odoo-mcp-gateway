@@ -16,27 +16,36 @@ from odoo_mcp_gateway.core.security import security_gate
 from odoo_mcp_gateway.core.version.adapters import get_adapter
 from odoo_mcp_gateway.core.version.detector import detect_version
 from odoo_mcp_gateway.server import (
-    get_current_session_key,
+    get_current_http_client,
     set_current_session_key,
 )
 
 
 def _resolve_source_id() -> str:
-    """Return a per-process source id for source-level rate limiting.
+    """Return a stable source id for failed-login rate limiting.
 
-    The previous literal ``"stdio"`` sentinel collapsed every process's
-    failure counter into a single global bucket — 30 failed logins from
-    ANY process in any role would lock out EVERY process for 15 minutes
-    (self-DoS). Including the PID gives each process its own bucket
-    while still catching naive username-rotation brute force.
+    Resolution order:
 
-    Session-aware buckets (post-login) are not used here because a wrong
-    password never establishes a session — using the session key would
-    rate-limit the user instead of the source of the failure.
+    1. The per-request HTTP-client ContextVar (set by
+       :class:`SessionResolverMiddleware`). In HTTP mode this carries
+       the immediate peer IP — or the first hop of ``X-Forwarded-For``
+       when ``trust_proxy`` is enabled — so each remote attacker has
+       their own bucket. CRITICAL: failed logins from peer A do not
+       affect peer B, otherwise an attacker hammering bad creds at the
+       gateway could DoS every legitimate caller for 15 minutes.
+    2. Fall back to ``stdio:<pid>``. Used in stdio mode (single user
+       per process by design) and as a defence-in-depth fallback when
+       the HTTP middleware did not run (e.g. background task).
+
+    We deliberately DO NOT use ``_current_session_key`` here: a wrong
+    password never establishes a session, and even when it did, using
+    a successful user's session key as their own rate-limit bucket
+    would let one accidental typo penalise their next 30 logins. The
+    rate limit must follow the SOURCE of the failure, not the victim.
     """
-    key = get_current_session_key()
-    if key is not None:
-        return key
+    http_client = get_current_http_client()
+    if http_client is not None:
+        return http_client
     return f"stdio:{os.getpid()}"
 
 

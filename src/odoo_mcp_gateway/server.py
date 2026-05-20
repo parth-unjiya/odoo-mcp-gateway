@@ -48,6 +48,23 @@ _current_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVa
     "_current_session_key", default=None
 )
 
+# ContextVar that carries the per-request HTTP client identifier
+# (typically remote IP, or the first hop of X-Forwarded-For when
+# ``gateway.trust_proxy`` is True). It is set by
+# :class:`SessionResolverMiddleware` on request entry and reset on
+# exit. Tools that want a stable "source" key for rate limiting
+# (notably the login tool) read this preferentially so that, in
+# HTTP mode, failed-login lockouts are SCOPED PER REMOTE PEER
+# rather than collapsing onto a single per-process bucket (which
+# would let any attacker DoS every other caller by hammering the
+# server with bad credentials).
+#
+# In stdio mode this stays at the default (None) and callers fall
+# back to a ``stdio:<pid>`` source key.
+_current_http_client: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_current_http_client", default=None
+)
+
 
 class GatewayContext:
     """Holds shared state for the gateway: config, security, discovery."""
@@ -242,6 +259,28 @@ def set_current_session_key(key: str | None) -> None:
 def get_current_session_key() -> str | None:
     """Get the current session key from the active request context."""
     return _current_session_key.get(None)
+
+
+def set_current_http_client(client_id: str | None) -> None:
+    """Set the current HTTP-client identifier for the active request.
+
+    Wrapper kept for symmetry with :func:`set_current_session_key`. The
+    HTTP middleware uses ``ContextVar.set`` directly so it can capture
+    the reset token; this helper is the public surface for any other
+    code that wants to project an alternate source identity (e.g. a
+    test scaffold simulating two distinct callers).
+    """
+    _current_http_client.set(client_id)
+
+
+def get_current_http_client() -> str | None:
+    """Return the HTTP-client id for the active request, or None.
+
+    None means either the gateway is running in stdio mode (no HTTP
+    request scope exists) OR the request middleware did not run yet
+    (e.g. background task spawned outside the request task tree).
+    """
+    return _current_http_client.get(None)
 
 
 def _resolve_session_auth_manager(gateway: GatewayContext) -> AuthManager:

@@ -49,7 +49,12 @@ async def _run_streamable_http(server: FastMCP, settings: Settings) -> None:
     )
 
     starlette_app = server.streamable_http_app()
-    starlette_app.user_middleware.append(Middleware(SessionResolverMiddleware))
+    # Pass ``settings`` so the middleware can honour ``trust_proxy`` when
+    # deciding whether to derive the per-request client id from
+    # ``X-Forwarded-For`` instead of the immediate peer IP.
+    starlette_app.user_middleware.append(
+        Middleware(SessionResolverMiddleware, settings=settings)
+    )
 
     # Mount /health, /ready, and (if prometheus_client is installed)
     # /metrics. The gateway was stashed on the server in create_server

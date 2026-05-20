@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     rate_limit_global: int = 60  # requests per minute
     rate_limit_write: int = 20  # write operations per minute
 
+    # ── HTTP transport ───────────────────────────────────────────────
+    # When the gateway is fronted by a reverse proxy (nginx, ALB,
+    # Cloudflare, ...), the immediate peer's IP is the proxy itself,
+    # not the real client. Setting ``trust_proxy=true`` makes the
+    # session-resolver middleware honour the FIRST hop of the
+    # ``X-Forwarded-For`` header as the source identity for IP-level
+    # rate limiting. SECURITY: leave this OFF unless the gateway is
+    # ACTUALLY behind a trusted proxy — otherwise any caller can
+    # forge XFF and trivially defeat rate limiting.
+    trust_proxy: bool = False
+
     # ── Validators ───────────────────────────────────────────────────
 
     @field_validator("odoo_url")
