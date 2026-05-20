@@ -690,3 +690,139 @@ class TestSessionIsolation:
 
         assert "is_admin" in resp
         assert resp["is_admin"] is True
+
+
+class TestFailedLoginActiveSessionMetadata:
+    """UAT H1 — Failed ``login`` must surface the still-active prior session.
+
+    Wrong-password attempts intentionally do NOT downgrade the active
+    session (see ``test_failed_login_preserves_session.py``). The caller's
+    user-perceived identity, however, may diverge from the gateway-of-
+    record identity. The fix attaches non-secret metadata (login, uid,
+    database) to the error payload so the caller can tell.
+    """
+
+    async def test_failed_login_with_prior_session_includes_metadata(self) -> None:
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        # Step 1: legitimate login establishes the prior session.
+        prior = _auth_result(uid=2, username="alice", database="testdb")
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_cls:
+            mgr = mock_cls.return_value
+            mgr.login = AsyncMock(return_value=prior)
+            mgr.auth_result = prior
+            mgr.close = AsyncMock()
+            mgr.register_session = MagicMock()
+            mgr.get_active_client = MagicMock(return_value=MagicMock())
+            await login_fn(
+                method="password",
+                credential="correct",
+                username="alice",
+                database="testdb",
+            )
+
+        assert "2_testdb" in gateway.auth_managers
+
+        # Step 2: failed login MUST surface active_session metadata.
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_cls:
+            bad = mock_cls.return_value
+            bad.login = AsyncMock(side_effect=OdooAuthError("bad credentials"))
+            bad.close = AsyncMock()
+            bad.register_session = MagicMock()
+            resp = await login_fn(
+                method="password",
+                credential="wrong",
+                username="attacker",
+                database="testdb",
+            )
+
+        assert "error" in resp
+        assert "active_session" in resp
+        active = resp["active_session"]
+        # Wire-shape: login, uid, database — and ABSOLUTELY no secrets.
+        assert active == {"login": "alice", "uid": 2, "database": "testdb"}
+        for forbidden in ("bearer_token", "token", "api_key", "password", "session_id"):
+            assert forbidden not in active
+
+    async def test_failed_login_with_no_prior_session_omits_metadata(self) -> None:
+        """No prior session → no ``active_session`` key in the error payload."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_cls:
+            bad = mock_cls.return_value
+            bad.login = AsyncMock(side_effect=OdooAuthError("bad credentials"))
+            bad.close = AsyncMock()
+            bad.register_session = MagicMock()
+            resp = await login_fn(
+                method="password",
+                credential="wrong",
+                username="anon",
+                database="testdb",
+            )
+
+        assert "error" in resp
+        assert "active_session" not in resp
+
+    async def test_successful_login_after_failed_attempt_no_active_session_echo(
+        self,
+    ) -> None:
+        """Successful login replaces the prior session; no active_session key."""
+        gateway = _make_gateway()
+        login_fn = _get_login_tool(gateway)
+
+        # Step 1: prior session as alice.
+        prior = _auth_result(uid=2, username="alice", database="testdb")
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_cls:
+            mgr = mock_cls.return_value
+            mgr.login = AsyncMock(return_value=prior)
+            mgr.auth_result = prior
+            mgr.close = AsyncMock()
+            mgr.register_session = MagicMock()
+            mgr.get_active_client = MagicMock(return_value=MagicMock())
+            await login_fn(
+                method="password",
+                credential="correct",
+                username="alice",
+                database="testdb",
+            )
+
+        # Step 2: a wrong-password attempt — preserves alice and emits metadata.
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_cls:
+            bad = mock_cls.return_value
+            bad.login = AsyncMock(side_effect=OdooAuthError("bad"))
+            bad.close = AsyncMock()
+            bad.register_session = MagicMock()
+            fail = await login_fn(
+                method="password",
+                credential="wrong",
+                username="bob",
+                database="testdb",
+            )
+        assert fail.get("active_session", {}).get("login") == "alice"
+
+        # Step 3: NOW bob successfully logs in. Response should NOT carry
+        # ``active_session`` — the new session IS the active one, and
+        # echoing the displaced identity would be confusing noise.
+        new = _auth_result(uid=5, username="bob", database="testdb")
+        with patch("odoo_mcp_gateway.tools.auth.AuthManager") as mock_cls:
+            mgr2 = mock_cls.return_value
+            mgr2.login = AsyncMock(return_value=new)
+            mgr2.auth_result = new
+            mgr2.close = AsyncMock()
+            mgr2.register_session = MagicMock()
+            mgr2.get_active_client = MagicMock(return_value=MagicMock())
+            ok = await login_fn(
+                method="password",
+                credential="correct",
+                username="bob",
+                database="testdb",
+            )
+
+        assert "error" not in ok
+        assert "active_session" not in ok
+        assert ok["uid"] == 5
+        # Sanity: alice's session is gone, bob's is in place.
+        assert "2_testdb" not in gateway.auth_managers
+        assert "5_testdb" in gateway.auth_managers

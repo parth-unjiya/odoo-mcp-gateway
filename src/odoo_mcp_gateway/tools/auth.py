@@ -17,6 +17,7 @@ from odoo_mcp_gateway.core.version.adapters import get_adapter
 from odoo_mcp_gateway.core.version.detector import detect_version
 from odoo_mcp_gateway.server import (
     get_current_http_client,
+    get_current_session_key,
     set_current_session_key,
 )
 
@@ -53,6 +54,48 @@ if TYPE_CHECKING:
     from odoo_mcp_gateway.server import GatewayContext
 
 logger = logging.getLogger(__name__)
+
+
+def _active_session_metadata(gateway: GatewayContext) -> dict[str, Any] | None:
+    """Return non-secret metadata about the currently active session, if any.
+
+    Used when reporting a FAILED ``login`` call: the caller often does not
+    realise their prior session is still in effect (a wrong password does
+    NOT downgrade the active identity by design — see
+    ``test_failed_login_preserves_session``). UAT H1 confirmed that an LLM
+    client cannot tell which identity it is now operating as.
+
+    To close that observability gap we attach the prior session's
+    ``{login, uid, database}`` to the error payload. We DO NOT include
+    bearer tokens, api_keys, password hashes, group XML IDs, or any
+    other material that would either let the caller assume the prior
+    identity stronger than they already can OR reveal more authorisation
+    surface than the prior login response already disclosed.
+
+    Returns ``None`` when there is no resolvable active session — the
+    caller should leave the error payload unchanged in that case (no
+    ``active_session`` key).
+    """
+    session_key = get_current_session_key()
+    mgr = None
+    if session_key is not None:
+        mgr = gateway.auth_managers.get(session_key)
+    if mgr is None and len(gateway.auth_managers) == 1:
+        # Stdio mode: single-session-per-process. Resolve the lone
+        # session deterministically so the metadata is still emitted
+        # even when the contextvar isn't set (e.g. legacy stdio call
+        # path that predates session middleware).
+        mgr = next(iter(gateway.auth_managers.values()))
+    if mgr is None:
+        return None
+    auth_result = getattr(mgr, "auth_result", None)
+    if auth_result is None:
+        return None
+    return {
+        "login": auth_result.username,
+        "uid": auth_result.uid,
+        "database": auth_result.database,
+    }
 
 
 async def _safe_dispatch_session_close(
@@ -310,7 +353,18 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
             gateway.login_rate_limiter.record_failure(username)
             gateway.login_ip_rate_limiter.record_failure(source_id)
             gateway.metrics.auth_attempts.labels(method=method, result="failure").inc()
-            return {"error": gateway.sanitize_error(e)}
+            # UAT H1: when a login attempt fails AND there is a prior
+            # active session, the caller cannot tell from the error
+            # payload that they are still operating as the previous
+            # identity. Surface the active session's identity (login,
+            # uid, database) — no secret material, no bearer token,
+            # no api_key, no password hash. If no prior session
+            # exists, the payload shape is unchanged.
+            error_payload: dict[str, Any] = {"error": gateway.sanitize_error(e)}
+            active = _active_session_metadata(gateway)
+            if active is not None:
+                error_payload["active_session"] = active
+            return error_payload
         except OdooError as e:
             gateway.metrics.auth_attempts.labels(method=method, result="error").inc()
             return {"error": gateway.sanitize_error(e)}
