@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-05-20
+
+### Fixed
+
+- **CRITICAL** — Add `packaging>=23.0` to runtime dependencies. v0.3.0
+  imported `packaging.specifiers.SpecifierSet` at module load
+  (`plugins/sdk.py`) but did not declare it, so a fresh `pip install`
+  failed at first import of anything that touched the plugin registry.
+  CI passed because `packaging` is transitively available in the
+  runner image. v0.3.0 has been yanked on PyPI with the same reason
+  string. **Upgrade path:** `pip install --upgrade odoo-mcp-gateway`.
+
+No other changes — v0.3.1 is a metadata-only patch over v0.3.0.
+
 ## [Unreleased] — pre-rc1 UAT findings fixed
 
 Multi-version UAT (Odoo 17 + 18 + 19) caught the following findings;
