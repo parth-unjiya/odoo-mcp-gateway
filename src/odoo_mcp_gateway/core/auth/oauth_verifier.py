@@ -62,15 +62,15 @@ DEFAULT_OAUTH_SCOPES: list[str] = [
 # ignore warning (when it's NOT — the binding becomes None below
 # and the symbol isn't read at runtime).
 try:
-    from authlib.jose import (
-        JsonWebToken,  # type: ignore[import-untyped, import-not-found, unused-ignore]
-    )
+    # fmt: off
+    from authlib.jose import JsonWebToken  # type: ignore[import-untyped, import-not-found, unused-ignore]  # noqa: I001
     from authlib.jose.errors import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
         BadSignatureError,
         DecodeError,
         ExpiredTokenError,
         InvalidClaimError,
     )
+    # fmt: on
 
     OAUTH_AVAILABLE = True
 except ImportError:  # pragma: no cover - import-guard branch

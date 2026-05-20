@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from odoo_mcp_gateway.core.security import security_gate
 from odoo_mcp_gateway.server import (
@@ -90,6 +90,7 @@ def register_bulk_tools(server: FastMCP, gateway: GatewayContext) -> None:
         records: list[dict[str, Any]],
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
         dry_run: bool = False,
+        ctx: Context[Any, Any, Any] | None = None,
     ) -> dict[str, Any]:
         """Create many records of *model* in batches.
 
@@ -210,6 +211,7 @@ def register_bulk_tools(server: FastMCP, gateway: GatewayContext) -> None:
             # via their own logic (Odoo has no client-visible
             # cross-request rollback).
             created_ids: list[int] = []
+            total_records = len(validated)
             for idx, chunk in enumerate(chunks):
                 try:
                     result = await client.execute_kw(
@@ -233,6 +235,29 @@ def register_bulk_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 elif isinstance(result, int):
                     created_ids.append(result)
 
+                # Progress notification — if the client passed a
+                # progressToken in the request meta, FastMCP surfaces
+                # ``ctx.report_progress`` as a live channel; otherwise
+                # it's a silent no-op so older clients aren't affected.
+                if ctx is not None:
+                    try:
+                        await ctx.report_progress(
+                            progress=len(created_ids),
+                            total=total_records,
+                            message=(
+                                f"Created {len(created_ids)} of "
+                                f"{total_records} records "
+                                f"(chunk {idx + 1}/{len(chunks)})"
+                            ),
+                        )
+                    except Exception:
+                        # Progress is best-effort — a broken channel
+                        # never blocks the bulk operation.
+                        logger.debug(
+                            "Progress notification failed",
+                            exc_info=True,
+                        )
+
             return {
                 "created_ids": created_ids,
                 "model": model,
@@ -253,6 +278,7 @@ def register_bulk_tools(server: FastMCP, gateway: GatewayContext) -> None:
         values: dict[str, Any],
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
         dry_run: bool = False,
+        ctx: Context[Any, Any, Any] | None = None,
     ) -> dict[str, Any]:
         """Apply *values* to every record in *record_ids*.
 
@@ -383,6 +409,7 @@ def register_bulk_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 }
 
             completed = 0
+            total_records = len(deduped)
             for idx, chunk in enumerate(id_chunks):
                 try:
                     await client.execute_kw(
@@ -401,6 +428,24 @@ def register_bulk_tools(server: FastMCP, gateway: GatewayContext) -> None:
                         "completed_chunks": idx,
                         "total_chunks": len(id_chunks),
                     }
+
+                # See bulk_create for the progress-channel rationale.
+                if ctx is not None:
+                    try:
+                        await ctx.report_progress(
+                            progress=completed,
+                            total=total_records,
+                            message=(
+                                f"Updated {completed} of "
+                                f"{total_records} records "
+                                f"(chunk {idx + 1}/{len(id_chunks)})"
+                            ),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Progress notification failed",
+                            exc_info=True,
+                        )
 
             return {
                 "updated_count": completed,

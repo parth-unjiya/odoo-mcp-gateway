@@ -261,6 +261,9 @@ async def security_gate(
                 exc_info=True,
             )
 
+    # Metrics surface (no-op stand-in when [observability] not installed).
+    metrics = getattr(gateway, "metrics", None)
+
     # 1. Rate limit check
     rate_limiter = getattr(gateway, "rate_limiter", None)
     if rate_limiter is not None:
@@ -269,6 +272,13 @@ async def security_gate(
         if not allowed:
             msg = str(rate_msg)
             _audit("denied", msg)
+            if metrics is not None:
+                metrics.rate_limit_rejections.labels(
+                    kind="write" if is_write else "read"
+                ).inc()
+                metrics.tool_requests.labels(
+                    tool=tool_name, status="rate_limited"
+                ).inc()
             return msg
 
     # 2. RBAC tool access check
@@ -278,9 +288,15 @@ async def security_gate(
         if rbac_msg:
             msg = str(rbac_msg)
             _audit("denied", msg)
+            if metrics is not None:
+                metrics.tool_requests.labels(tool=tool_name, status="denied").inc()
             return msg
 
-    # 3. Audit log allowed
+    # 3. Audit log allowed + record tool invocation. Latency is
+    # recorded by the tool itself (the gate doesn't see the tool
+    # finish, only its start).
     _audit("allowed")
+    if metrics is not None:
+        metrics.tool_requests.labels(tool=tool_name, status="allowed").inc()
 
     return None

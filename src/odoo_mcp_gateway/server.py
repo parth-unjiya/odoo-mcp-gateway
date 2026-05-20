@@ -113,6 +113,25 @@ class GatewayContext:
         # Version-specific adapter (set during login after version detection).
         # Drives field-rename translation, context normalization, etc.
         self.version_adapter: VersionAdapter | None = None
+        # Observability registry — built ONCE per process by
+        # ``__main__._run_streamable_http`` when HTTP transport
+        # starts. In stdio mode or when ``[observability]`` isn't
+        # installed, this stays at the no-op default so every
+        # metric call is a free pass. Tools / middleware fetch via
+        # ``gateway.metrics`` and never have to None-check the
+        # individual counters.
+        from odoo_mcp_gateway.core.observability.metrics import MetricsRegistry
+        from odoo_mcp_gateway.core.observability.subscriptions import (
+            SubscriptionTracker,
+        )
+
+        self.metrics: MetricsRegistry = MetricsRegistry()
+        # Resource-subscription registry (Sprint 5). Sessions register
+        # interest in odoo:// URIs via ``resources/subscribe``; the
+        # notification push channel (``notifications/resources/updated``)
+        # ships in v0.4.0 alongside Odoo bus integration. v0.3.0 only
+        # tracks state so the on_session_close hook can clean up.
+        self.subscriptions: SubscriptionTracker = SubscriptionTracker()
 
     async def cleanup(self) -> None:
         """Close all auth managers and their underlying connections."""

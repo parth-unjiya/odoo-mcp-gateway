@@ -228,6 +228,13 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
             gateway.login_rate_limiter.record_success(username)
             gateway.login_ip_rate_limiter.record_success(source_id)
 
+            # Observability: count the successful auth + refresh the
+            # active-sessions gauge to len(auth_managers). The gauge
+            # is monotonic in steady state (one session per process
+            # in stdio; up to ``max_concurrent_sessions`` in HTTP).
+            gateway.metrics.auth_attempts.labels(method=method, result="success").inc()
+            gateway.metrics.active_sessions.set(len(gateway.auth_managers))
+
             response: dict[str, Any] = {
                 "user": result.username,
                 "uid": result.uid,
@@ -255,9 +262,12 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
         except OdooAuthError as e:
             gateway.login_rate_limiter.record_failure(username)
             gateway.login_ip_rate_limiter.record_failure(source_id)
+            gateway.metrics.auth_attempts.labels(method=method, result="failure").inc()
             return {"error": gateway.sanitize_error(e)}
         except OdooError as e:
+            gateway.metrics.auth_attempts.labels(method=method, result="error").inc()
             return {"error": gateway.sanitize_error(e)}
         except Exception as e:
             logger.exception("Unexpected error during login")
+            gateway.metrics.auth_attempts.labels(method=method, result="error").inc()
             return {"error": gateway.sanitize_error(e)}

@@ -58,13 +58,15 @@ async def _run_streamable_http(server: FastMCP, settings: Settings) -> None:
     if gateway is not None:
         for route in build_health_routes(gateway):
             starlette_app.router.routes.append(route)
-    metrics_registry = MetricsRegistry()
+    # Reuse the gateway's already-built MetricsRegistry — Sprint 5
+    # wired call sites against gateway.metrics, so we MUST expose
+    # the same instance via /metrics rather than building a fresh
+    # (empty) registry here.
+    metrics_registry = gateway.metrics if gateway is not None else MetricsRegistry()
     metrics_route = build_metrics_route(metrics_registry)
     if metrics_route is not None:
         starlette_app.router.routes.append(metrics_route)
-        # Stash the registry on the server so future call sites (Sprint 5
-        # tracing wiring) can record observations without an additional
-        # plumbing hop.
+        # Stash on the server for diagnostic introspection in tests.
         server._metrics_registry = metrics_registry  # type: ignore[attr-defined]
 
     # Force re-build of the middleware stack on next request so our
@@ -94,9 +96,16 @@ def main() -> None:
     # Configure structlog if available — emits JSON to stdout with
     # auto-injected ContextVars (mcp_session_id, trace_id). No-op
     # when the [observability] extra isn't installed.
-    from odoo_mcp_gateway.core.observability import configure_structlog
+    # Configure OTel tracing similarly — spans become observable
+    # (and optionally exported) when OTEL_EXPORTER_OTLP_ENDPOINT
+    # is set; otherwise the cost is in-process metadata only.
+    from odoo_mcp_gateway.core.observability import (
+        configure_structlog,
+        configure_tracing,
+    )
 
     configure_structlog()
+    configure_tracing()
 
     logger.info(
         "Starting odoo-mcp-gateway v%s (transport=%s)",

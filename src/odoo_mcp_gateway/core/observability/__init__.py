@@ -37,12 +37,28 @@ from odoo_mcp_gateway.core.observability.metrics import (
 from odoo_mcp_gateway.core.observability.structured_logging import (
     configure_structlog,
 )
+from odoo_mcp_gateway.core.observability.subscriptions import (
+    SubscriptionTracker,
+    notify_resource_changed,
+)
+from odoo_mcp_gateway.core.observability.tracing import (
+    TRACING_AVAILABLE,
+    configure_tracing,
+    shutdown_tracing,
+    tool_span,
+)
 
 __all__ = [
     "OBSERVABILITY_AVAILABLE",
+    "TRACING_AVAILABLE",
     "MetricsRegistry",
+    "SubscriptionTracker",
     "build_health_routes",
     "build_metrics_route",
     "configure_structlog",
+    "configure_tracing",
     "is_ready",
+    "notify_resource_changed",
+    "shutdown_tracing",
+    "tool_span",
 ]
