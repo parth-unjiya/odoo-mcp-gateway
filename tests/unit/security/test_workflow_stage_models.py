@@ -21,9 +21,7 @@ from odoo_mcp_gateway.core.security.config_loader import (
 from odoo_mcp_gateway.core.security.restrictions import RestrictionChecker
 
 _EXAMPLE = (
-    Path(__file__).parent.parent.parent.parent
-    / "config"
-    / "model_access.yaml.example"
+    Path(__file__).parent.parent.parent.parent / "config" / "model_access.yaml.example"
 )
 
 

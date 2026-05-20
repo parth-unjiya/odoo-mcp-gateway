@@ -100,7 +100,12 @@ def _make_context(
     auth_result = MagicMock()
     auth_result.uid = uid
     auth_result.is_admin = is_admin
-    auth_result.groups = groups or []
+    auth_result.groups = groups or ["base.group_user"]
+    # UAT M1 / MED-2: explicit ``group_xml_ids`` so ``is_portal_user``
+    # doesn't classify these test users as portal (which would short-
+    # circuit certain plugin tools before reaching the restriction
+    # check this file is intended to exercise).
+    auth_result.group_xml_ids = ["base.group_user"]
 
     auth_mgr = MagicMock()
     auth_mgr.auth_result = auth_result

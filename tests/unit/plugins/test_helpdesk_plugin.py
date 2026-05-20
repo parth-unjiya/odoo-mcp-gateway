@@ -442,9 +442,7 @@ class TestUpdateTicketStageAclScope:
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
         # No ``user_id`` clamp — Odoo's ir.rule is now the sole gate.
-        assert all(
-            not (isinstance(d, list) and d[0] == "user_id") for d in domain
-        )
+        assert all(not (isinstance(d, list) and d[0] == "user_id") for d in domain)
         assert ["id", "=", 5] in domain
 
     async def test_admin_update_ticket_stage_uses_id_only_domain(
@@ -460,9 +458,7 @@ class TestUpdateTicketStageAclScope:
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
         assert ["id", "=", 5] in domain
-        assert all(
-            not (isinstance(d, list) and d[0] == "user_id") for d in domain
-        )
+        assert all(not (isinstance(d, list) and d[0] == "user_id") for d in domain)
 
     async def test_manager_can_update_ticket_owned_by_other_user(
         self, nonadmin_helpdesk_tools, nonadmin_helpdesk_context

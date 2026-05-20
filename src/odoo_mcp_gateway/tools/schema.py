@@ -157,12 +157,12 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
             # estimate is intentionally pessimistic (rough mean
             # description length 150 chars in non-compact mode, ~32 chars
             # in compact mode) so we trigger before the harness truncates.
-            _SOFT_CAP_BYTES = 750_000
+            soft_cap_bytes = 750_000
             if not paginated:
                 est_per_entry = 32 if compact else 200
-                if total * est_per_entry > _SOFT_CAP_BYTES:
+                if total * est_per_entry > soft_cap_bytes:
                     # Slice to roughly hit the cap and flag truncation.
-                    keep = max(1, _SOFT_CAP_BYTES // est_per_entry)
+                    keep = max(1, soft_cap_bytes // est_per_entry)
                     if keep < len(result):
                         result = result[:keep]
                         truncated = True
@@ -275,9 +275,7 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
                 if raw:
                     if "," in raw:
                         names = {
-                            tok.strip().lower()
-                            for tok in raw.split(",")
-                            if tok.strip()
+                            tok.strip().lower() for tok in raw.split(",") if tok.strip()
                         }
                         if names:
                             filter_mode = ("names", names)

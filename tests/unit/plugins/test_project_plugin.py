@@ -356,9 +356,7 @@ class TestUpdateTaskStageAclScope:
         await nonadmin_project_tools["update_task_stage"](task_id=10, stage_id=2)
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
-        assert all(
-            not (isinstance(d, list) and d[0] == "user_ids") for d in domain
-        )
+        assert all(not (isinstance(d, list) and d[0] == "user_ids") for d in domain)
         assert ["id", "=", 10] in domain
 
     async def test_admin_update_task_stage_uses_id_only_domain(

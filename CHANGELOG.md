@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — pre-rc1 UAT findings fixed
+
+Multi-version UAT (Odoo 17 + 18 + 19) caught the following findings;
+all HIGH and MEDIUM items are fixed before `v0.3.0-rc1`.
+
+### HIGH
+
+- **UAT H1 (Odoo 18)** — Failed `login` now surfaces the still-active
+  prior session's identity in the error payload as
+  `active_session: {login, uid, database}`. No secrets (bearer token,
+  api_key, password hash) are included. When there is no prior
+  session, the payload shape is unchanged.
+- **UAT HIGH-1 (Odoo 19)** — `update_ticket_stage` and (for parity)
+  `update_task_stage` no longer narrow the lookup domain below
+  `["id", "=", <id>]` for non-admin callers. The previous
+  `["user_id", "=", uid]` / `["user_ids", "in", [uid]]` clamps were
+  strictly narrower than Odoo's row-level ACL and produced a
+  misleading "Ticket/Task not found" for tickets a helpdesk_manager
+  or project_manager could legitimately read. Visibility now defers
+  to Odoo's `ir.rule`; write-ACL denials surface verbatim
+  (post-sanitisation) rather than masked as 404s.
+
+### MEDIUM
+
+- **UAT MED-1 (Odoo 17)** — `get_model_fields(field_filter=...)` now
+  accepts a list, a comma-separated string, or a single substring
+  token. CSV / list inputs do exact-name match; single tokens keep the
+  legacy substring behaviour. The filter intersects with RBAC
+  redaction (a redacted field is never returned even if explicitly
+  named).
+- **UAT MED-2 (Odoo 17)** — `list_models` accepts `compact: bool`,
+  `limit: int | None`, and `offset: int = 0`. Responses now include
+  `total` (the unpaginated count) and, when truncated, `truncated:
+  true` plus a `hint` field. A 750 KB soft auto-cap protects
+  custom-module-heavy DBs from blowing the MCP response cap.
+- **UAT MED-1 (Odoo 19)** — `config/model_access.yaml.example` now
+  lists `project.task.type`, `helpdesk.stage`, and `helpdesk.team`
+  under `stock_models.read_only` so callers can discover valid
+  stage IDs for the `update_task_stage` / `update_ticket_stage`
+  workflow tools.
+- **UAT M1 / MED-2 (Odoo 18 + 19)** — New `is_portal_user(...)` helper
+  in `core/security/rbac.py` detects portal/external users by group
+  set. `list_models` now distinguishes admin → internal → portal
+  tiers; portal users get a tight curated list (default:
+  `["res.partner"]`, overridable via `model_access.yaml::portal_models`).
+- **UAT M2 (Odoo 18)** — Access-denial messages now name the tier
+  they're enforcing: `admin_only` says "admin-only and the current
+  user is not an admin"; `admin_write_only` says "allows write only
+  for admin"; hardcoded blocks keep the "always blocked" wording.
+  Operators reading `list_models` no longer see the same model
+  labelled `admin_only` AND get an "always blocked" error from CRUD.
+
+### LOW
+
+- **UAT LOW-1 (Odoo 19)** — Portal users' `get_my_profile` no longer
+  leaks the `hr.employee.public` model name or the missing-group XML
+  ID. Portal callers receive a friendly
+  `"Profile not available for portal users"` with a hint; internal
+  users keep the rich error.
+- **UAT LOW-2 (Odoo 19)** — Non-HR-linked users (`sales_user`,
+  `project_user`, `helpdesk_user`) reading their profile get a
+  `hint` directing them to ask HR to create an `hr.employee` record
+  if they need attendance/leave features.
+- **UAT LOW-1 (Odoo 17)** — `search_count` against a non-existent
+  model now prefixes the bare-model-name error with
+  `"Model not found: "` so the message is actionable.
+- **UAT L2 (Odoo 18)** — Confirmed intentional: VAT masking on
+  `res.partner` applies to all non-admin readers, including portal
+  users reading their own record. A new regression test
+  (`tests/unit/security/test_field_masking.py`) pins the behaviour
+  so a future change has to break a documented expectation.
+
 ## [0.3.0] - 2026-05-20
 
 Major release — enterprise multi-user HTTP transport, OAuth 2.1 bearer auth, Plugin SDK 1.0, observability stack, and 8 new MCP-spec capabilities. **Strict backward-compat**: every v0.2.x stdio user upgrades with **zero config changes**.
