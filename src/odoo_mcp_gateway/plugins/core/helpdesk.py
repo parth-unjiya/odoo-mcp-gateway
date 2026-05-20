@@ -31,6 +31,8 @@ _STATE_FILTER_RE = re.compile(r"^[\w \-]{1,64}$")
 class HelpdeskPlugin(OdooPlugin):
     """Provides MCP tools for helpdesk: tickets, teams, priorities."""
 
+    plugin_sdk_version = ">=1.0,<2.0"
+
     @property
     def name(self) -> str:
         return "helpdesk"

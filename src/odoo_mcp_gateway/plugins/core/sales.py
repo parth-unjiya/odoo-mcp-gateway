@@ -28,6 +28,8 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 class SalesPlugin(OdooPlugin):
     """Provides MCP tools for sales: quotations, orders, pipeline analysis."""
 
+    plugin_sdk_version = ">=1.0,<2.0"
+
     @property
     def name(self) -> str:
         return "sales"

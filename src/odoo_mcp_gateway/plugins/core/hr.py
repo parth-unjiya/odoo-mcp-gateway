@@ -31,6 +31,11 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 class HRPlugin(OdooPlugin):
     """Provides MCP tools for HR operations: attendance, leave, employee profile."""
 
+    # Explicit Plugin SDK 1.0 compat declaration. The base class default
+    # would cover this, but stating it inline serves as a copy-template
+    # for external plugin authors.
+    plugin_sdk_version = ">=1.0,<2.0"
+
     @property
     def name(self) -> str:
         return "hr"

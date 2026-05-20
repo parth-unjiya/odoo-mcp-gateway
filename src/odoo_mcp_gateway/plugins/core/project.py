@@ -35,6 +35,8 @@ _VALID_TASK_STATES = frozenset(
 class ProjectPlugin(OdooPlugin):
     """Provides MCP tools for project management: tasks, stages, summaries."""
 
+    plugin_sdk_version = ">=1.0,<2.0"
+
     @property
     def name(self) -> str:
         return "project"

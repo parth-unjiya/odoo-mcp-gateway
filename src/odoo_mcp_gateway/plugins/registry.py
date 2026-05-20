@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .base import OdooPlugin
+from .sdk import (
+    PLUGIN_SDK_VERSION,
+    PluginContext,
+    check_plugin_sdk_compat,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,11 @@ class PluginInfo:
     load_error: str | None = None
     required_modules: list[str] = field(default_factory=list)
     missing_modules: list[str] = field(default_factory=list)
+    # Plugin SDK 1.0: which SDK range this plugin claims compat with.
+    # Populated from the plugin class's ``plugin_sdk_version`` attribute
+    # at registration time. May be ``None`` for legacy plugins; those
+    # are loaded with a deprecation warning.
+    plugin_sdk_version: str | None = None
 
 
 class PluginRegistry:
@@ -90,13 +100,24 @@ class PluginRegistry:
         """Manually register a plugin class (for testing or programmatic use)."""
         try:
             instance = plugin_class()
+            sdk_spec = _read_plugin_sdk_version(plugin_class, instance)
+            ok, message = check_plugin_sdk_compat(instance.name, sdk_spec)
+            if message:
+                # Warn on compat issues; error on outright refusal.
+                if ok:
+                    logger.warning("%s", message)
+                else:
+                    logger.error("%s", message)
             info = PluginInfo(
                 name=instance.name,
                 version=instance.version,
                 description=instance.description,
                 plugin_class=plugin_class,
-                instance=instance,
+                instance=instance if ok else None,
+                enabled=ok,
                 required_modules=instance.required_odoo_modules,
+                plugin_sdk_version=sdk_spec,
+                load_error=None if ok else message,
             )
         except Exception as e:
             info = PluginInfo(
@@ -227,13 +248,23 @@ class PluginRegistry:
                 )
 
             instance = plugin_class()
+            sdk_spec = _read_plugin_sdk_version(plugin_class, instance)
+            ok, message = check_plugin_sdk_compat(instance.name, sdk_spec)
+            if message:
+                if ok:
+                    logger.warning("%s", message)
+                else:
+                    logger.error("%s", message)
             return PluginInfo(
                 name=instance.name,
                 version=instance.version,
                 description=instance.description,
                 plugin_class=plugin_class,
-                instance=instance,
+                instance=instance if ok else None,
+                enabled=ok,
                 required_modules=instance.required_odoo_modules,
+                plugin_sdk_version=sdk_spec,
+                load_error=None if ok else message,
             )
         except Exception as e:
             logger.error("Failed to load plugin '%s': %s", name, e)
@@ -244,3 +275,149 @@ class PluginRegistry:
                 plugin_class=OdooPlugin,  # type: ignore[type-abstract]
                 load_error=str(e),
             )
+
+    # ----------------------------------------------------------------
+    # Lifecycle dispatch
+    #
+    # The async dispatch helpers iterate over all active plugins and
+    # call the corresponding hook. They catch and log per-plugin
+    # exceptions so one misbehaving plugin can't take down the whole
+    # request path. Plugins that don't implement a particular hook
+    # inherit the no-op defaults from ``OdooPlugin``.
+    # ----------------------------------------------------------------
+
+    async def dispatch_pre_register(self, gateway: Any) -> None:
+        """Call ``pre_register`` on every active plugin (async, parallel)."""
+        for info in self.get_active_plugins():
+            if info.instance is None:
+                continue
+            try:
+                ctx = PluginContext(gateway, info.name)
+                await info.instance.pre_register(ctx)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "Plugin '%s' pre_register hook failed: %s",
+                    info.name,
+                    e,
+                )
+
+    async def dispatch_post_register(self, gateway: Any) -> None:
+        """Call ``post_register`` on every active plugin."""
+        for info in self.get_active_plugins():
+            if info.instance is None:
+                continue
+            try:
+                ctx = PluginContext(gateway, info.name)
+                await info.instance.post_register(ctx)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "Plugin '%s' post_register hook failed: %s",
+                    info.name,
+                    e,
+                )
+
+    async def dispatch_pre_call(
+        self,
+        gateway: Any,
+        tool: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Call ``pre_call`` on every active plugin. Re-raises plugin
+        exceptions so a plugin can abort the call by raising."""
+        for info in self.get_active_plugins():
+            if info.instance is None:
+                continue
+            ctx = PluginContext(gateway, info.name)
+            await info.instance.pre_call(tool, arguments, ctx)
+
+    async def dispatch_post_call(
+        self,
+        gateway: Any,
+        tool: str,
+        result: Any,
+    ) -> Any:
+        """Run ``post_call`` on every active plugin; the result can be
+        transformed by each plugin in turn."""
+        for info in self.get_active_plugins():
+            if info.instance is None:
+                continue
+            try:
+                ctx = PluginContext(gateway, info.name)
+                result = await info.instance.post_call(tool, result, ctx)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "Plugin '%s' post_call hook failed (result unchanged): %s",
+                    info.name,
+                    e,
+                )
+        return result
+
+    async def dispatch_on_session_close(
+        self,
+        gateway: Any,
+        session_key: str,
+    ) -> None:
+        """Call ``on_session_close`` on every active plugin."""
+        for info in self.get_active_plugins():
+            if info.instance is None:
+                continue
+            try:
+                ctx = PluginContext(gateway, info.name)
+                await info.instance.on_session_close(session_key, ctx)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "Plugin '%s' on_session_close hook failed: %s",
+                    info.name,
+                    e,
+                )
+
+    async def dispatch_on_external_event(
+        self,
+        gateway: Any,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Call ``on_external_event`` on every active plugin.
+
+        Reserved for v0.4.0 webhook delivery — currently NEVER called
+        in production. Plugins implementing the hook today are
+        future-ready when v0.4.0 lands.
+        """
+        for info in self.get_active_plugins():
+            if info.instance is None:
+                continue
+            try:
+                ctx = PluginContext(gateway, info.name)
+                await info.instance.on_external_event(event_type, payload, ctx)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "Plugin '%s' on_external_event hook failed: %s",
+                    info.name,
+                    e,
+                )
+
+
+def _read_plugin_sdk_version(plugin_class: type, instance: Any) -> str | None:
+    """Look up ``plugin_sdk_version`` on the class or instance.
+
+    Plugins may declare the attribute as a class attribute (most
+    common) or as an instance attribute (set in ``__init__``). We
+    check the instance first so the latter overrides the former.
+    Returns ``None`` if the attribute is missing entirely.
+    """
+    value = getattr(instance, "plugin_sdk_version", None)
+    if value is None:
+        value = getattr(plugin_class, "plugin_sdk_version", None)
+    if value is None:
+        return None
+    return str(value)
+
+
+# Re-export for backward compatibility with anyone importing the
+# constant from the registry module.
+__all__ = [
+    "ENTRY_POINT_GROUP",
+    "PLUGIN_SDK_VERSION",
+    "PluginInfo",
+    "PluginRegistry",
+]

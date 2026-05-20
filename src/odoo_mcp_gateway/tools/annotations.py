@@ -131,6 +131,21 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
         idempotentHint=False,
         openWorldHint=False,
     ),
+    # ── bulk operations (ADR-010) ────────────────────────────────
+    "bulk_create": ToolAnnotations(
+        title="Create many records in batched single-transaction chunks",
+        readOnlyHint=False,
+        destructiveHint=False,  # additive only
+        idempotentHint=False,  # each call creates new records
+        openWorldHint=False,
+    ),
+    "bulk_update": ToolAnnotations(
+        title="Apply field updates to many records in batched chunks",
+        readOnlyHint=False,
+        destructiveHint=False,  # overwrites named fields; doesn't delete
+        idempotentHint=True,  # writing same vals to same IDs is a no-op
+        openWorldHint=False,
+    ),
     # ── workflow ──────────────────────────────────────────────────
     "get_create_requirements": ToolAnnotations(
         title="Get the schema needed to create a record",

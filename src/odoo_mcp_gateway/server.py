@@ -386,12 +386,14 @@ def create_server(settings: Settings) -> FastMCP:
 
     # Import and register all tool groups
     from odoo_mcp_gateway.tools.auth import register_auth_tools
+    from odoo_mcp_gateway.tools.bulk import register_bulk_tools
     from odoo_mcp_gateway.tools.crud import register_crud_tools
     from odoo_mcp_gateway.tools.schema import register_schema_tools
 
     register_auth_tools(server, gateway)
     register_schema_tools(server, gateway)
     register_crud_tools(server, gateway)
+    register_bulk_tools(server, gateway)
 
     # Register MCP Resources and Prompts
     from odoo_mcp_gateway.prompts.handlers import register_prompts
