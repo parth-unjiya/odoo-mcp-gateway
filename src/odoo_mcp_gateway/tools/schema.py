@@ -28,8 +28,35 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
     async def list_models(
         filter: str = "",
         include_custom: bool = True,
+        compact: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
-        """List available Odoo models. Optionally filter by keyword."""
+        """List available Odoo models. Optionally filter by keyword.
+
+        On large databases (e.g. custom-module-heavy deployments with
+        500+ models) the full payload can exceed the MCP response
+        cap. This tool now offers three independent knobs to keep the
+        payload small:
+
+        * ``compact`` (default ``False``) — when ``True`` each entry
+          is just ``{"model": "<name>"}`` (no description, is_custom,
+          or access_level metadata). Drops payload size by ~80%.
+        * ``limit`` / ``offset`` — caller-driven pagination. When
+          ``limit`` is set, only that many entries are returned starting
+          at ``offset``. The response carries ``truncated: True`` and
+          ``total: <full_count>`` so the caller can iterate.
+        * Soft auto-cap — even when no caller pagination is requested,
+          if the projected serialised size exceeds the per-response
+          soft cap (~750 KB) the response is auto-truncated and a
+          ``hint`` field tells the caller to opt in to ``compact`` or
+          ``limit``. This protects against blowing the MCP cap on
+          customers we haven't sized for.
+
+        ``total`` is ALWAYS the unpaginated, unfiltered-by-this-call
+        count of accessible models — callers should consult it to
+        decide whether more pages remain.
+        """
         try:
             filter = filter.strip().lower()[:256]
             client = _get_client(gateway)
@@ -43,6 +70,12 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
             gate_error = await security_gate(gateway, "list_models", session_key)
             if gate_error:
                 return {"error": gate_error}
+
+            # Reject illegal pagination args before doing any work.
+            if limit is not None and limit <= 0:
+                return {"error": "limit must be a positive integer (>=1)"}
+            if offset < 0:
+                return {"error": "offset must be >= 0"}
 
             # Trigger discovery if needed
             if not gateway._models_discovered:
@@ -67,17 +100,63 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if not include_custom:
                 models = [m for m in models if not m.is_custom]
 
-            result = [
-                {
+            total = len(models)
+            truncated = False
+            auto_hint: str | None = None
+
+            # Caller-driven pagination wins over the soft auto-cap.
+            paginated = limit is not None or offset > 0
+            if paginated:
+                start = offset
+                end = total if limit is None else min(total, offset + limit)
+                models = models[start:end]
+                if end < total:
+                    truncated = True
+
+            # Build the projection (compact vs full).
+            def _project(m: Any) -> dict[str, Any]:
+                if compact:
+                    return {"model": m.name}
+                return {
                     "model": m.name,
                     "description": m.description,
                     "is_custom": m.is_custom,
                     "access_level": m.access_level.value,
                 }
-                for m in models
-            ]
 
-            return {"models": result, "count": len(result)}
+            result = [_project(m) for m in models]
+
+            # Soft auto-cap. Estimate per-entry size only when a real cap
+            # might bite — i.e. caller didn't already paginate. The
+            # estimate is intentionally pessimistic (rough mean
+            # description length 150 chars in non-compact mode, ~32 chars
+            # in compact mode) so we trigger before the harness truncates.
+            _SOFT_CAP_BYTES = 750_000
+            if not paginated:
+                est_per_entry = 32 if compact else 200
+                if total * est_per_entry > _SOFT_CAP_BYTES:
+                    # Slice to roughly hit the cap and flag truncation.
+                    keep = max(1, _SOFT_CAP_BYTES // est_per_entry)
+                    if keep < len(result):
+                        result = result[:keep]
+                        truncated = True
+                        auto_hint = (
+                            "Response auto-truncated to stay under the "
+                            "per-response soft cap. Use compact=true for "
+                            "a smaller projection, or paginate via "
+                            "limit/offset to retrieve everything."
+                        )
+
+            response: dict[str, Any] = {
+                "models": result,
+                "count": len(result),
+                "total": total,
+            }
+            if truncated:
+                response["truncated"] = True
+                if auto_hint is not None:
+                    response["hint"] = auto_hint
+            return response
 
         except ValueError as e:
             return {"error": str(e)}

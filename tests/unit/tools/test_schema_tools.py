@@ -172,6 +172,133 @@ class TestListModels:
 
         assert resp["models"][0]["access_level"] == "read_only"
 
+    async def test_response_includes_total_count(self) -> None:
+        """UAT MED-2 prep: every response carries an unpaginated ``total``."""
+        gateway = make_gateway()
+        gateway.model_registry._models = {
+            "a.model": ModelInfo(
+                name="a.model",
+                description="A",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+            "b.model": ModelInfo(
+                name="b.model",
+                description="B",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+        }
+        gateway._models_discovered = True
+
+        tools = _get_tools(gateway)
+        resp = await tools["list_models"]()
+        assert resp["count"] == resp["total"] == 2
+        assert "truncated" not in resp
+
+    async def test_compact_mode_returns_name_only(self) -> None:
+        """UAT MED-2 — ``compact=True`` strips metadata for small payloads."""
+        gateway = make_gateway()
+        gateway.model_registry._models = {
+            "res.partner": ModelInfo(
+                name="res.partner",
+                description="Contact",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            ),
+        }
+        gateway._models_discovered = True
+
+        tools = _get_tools(gateway)
+        resp = await tools["list_models"](compact=True)
+
+        entry = resp["models"][0]
+        assert set(entry.keys()) == {"model"}
+        assert entry["model"] == "res.partner"
+
+    async def test_pagination_offset_limit(self) -> None:
+        """UAT MED-2 — caller-driven ``offset``/``limit`` paginates the list."""
+        gateway = make_gateway()
+        gateway.model_registry._models = {
+            f"x.model_{i:02d}": ModelInfo(
+                name=f"x.model_{i:02d}",
+                description=f"Model {i}",
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            )
+            for i in range(10)
+        }
+        gateway._models_discovered = True
+
+        tools = _get_tools(gateway)
+        page1 = await tools["list_models"](limit=3, offset=0, compact=True)
+        page2 = await tools["list_models"](limit=3, offset=3, compact=True)
+        page3 = await tools["list_models"](limit=3, offset=6, compact=True)
+        page4 = await tools["list_models"](limit=3, offset=9, compact=True)
+
+        # Pages 1-3: truncated, total carries 10.
+        for p in (page1, page2, page3):
+            assert p["truncated"] is True
+            assert p["total"] == 10
+            assert p["count"] == 3
+        # Page 4: only 1 item, last page → not truncated.
+        assert page4["count"] == 1
+        assert page4.get("truncated") is None or page4.get("truncated") is False
+
+        # Pages don't overlap and together cover all 10.
+        seen = {m["model"] for p in (page1, page2, page3, page4) for m in p["models"]}
+        assert len(seen) == 10
+
+    async def test_invalid_limit_and_offset_rejected(self) -> None:
+        gateway = make_gateway()
+        gateway.model_registry._models = {}
+        gateway._models_discovered = True
+        tools = _get_tools(gateway)
+
+        resp_bad_limit = await tools["list_models"](limit=0)
+        assert "error" in resp_bad_limit
+        resp_bad_offset = await tools["list_models"](offset=-5)
+        assert "error" in resp_bad_offset
+
+    async def test_auto_truncate_above_soft_cap(self) -> None:
+        """UAT MED-2 — large model catalogs auto-truncate with a hint."""
+        # 5000 entries × 200 byte est = 1_000_000 > 750_000 cap.
+        gateway = make_gateway()
+        gateway.model_registry._models = {
+            f"big.model_{i:05d}": ModelInfo(
+                name=f"big.model_{i:05d}",
+                description="x" * 100,
+                is_custom=False,
+                is_transient=False,
+                module="base",
+                state="base",
+                access_level=AccessLevel.FULL_CRUD,
+            )
+            for i in range(5000)
+        }
+        gateway._models_discovered = True
+
+        tools = _get_tools(gateway)
+        resp = await tools["list_models"]()
+        # Auto-truncated, hint surfaced.
+        assert resp["truncated"] is True
+        assert resp["total"] == 5000
+        assert resp["count"] < 5000
+        assert "hint" in resp
+        assert "compact=true" in resp["hint"] or "limit/offset" in resp["hint"]
+
     async def test_admin_sees_admin_only_models(self) -> None:
         gateway = make_gateway(is_admin=True)
         gateway.model_registry._models = {
