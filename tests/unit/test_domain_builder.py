@@ -77,20 +77,45 @@ class TestValidateDomain:
             validate_domain([("name", "=")])
 
     def test_validate_too_many_leaves(self) -> None:
-        domain = [("field_a", "=", i) for i in range(MAX_DOMAIN_LEAVES + 1)]
+        # MAX_DOMAIN_LEAVES+1 leaves joined into a balanced polish AND
+        # tree — depth stays log2(51) ≈ 6, well under MAX_DOMAIN_DEPTH,
+        # so the failure is specifically the leaf-count limit and not
+        # a depth violation.
+        leaves = [("field_a", "=", i) for i in range(MAX_DOMAIN_LEAVES + 1)]
+        domain = _balanced_and(leaves)
         with pytest.raises(DomainValidationError, match="Too many domain conditions"):
             validate_domain(domain)
 
     def test_validate_too_deeply_nested(self) -> None:
-        # Create a deeply nested domain with boolean operators
+        # Build a right-recursive AND tree of depth > MAX_DOMAIN_DEPTH.
+        # Each '&' is binary, so we need 2 operands; the first is a
+        # leaf, the second is the next '&' (recursive). After
+        # MAX_DOMAIN_DEPTH+1 levels of nesting we should trip the
+        # depth check.
+        depth = MAX_DOMAIN_DEPTH + 1
+        # depth nested ANDs + (depth + 1) leaves makes a legal polish
+        # tree: ['&', leaf, '&', leaf, ..., '&', leaf, leaf]
         domain: list = []
-        for _ in range(MAX_DOMAIN_DEPTH + 1):
+        for _ in range(depth):
             domain.append("&")
-        # Add enough leaves for the boolean operators
-        for i in range(MAX_DOMAIN_DEPTH + 2):
-            domain.append(("field_a", "=", i))
+            domain.append(("field_a", "=", 0))
+        domain.append(("field_a", "=", 0))
         with pytest.raises(DomainValidationError, match="too deeply nested"):
             validate_domain(domain)
+
+
+def _balanced_and(leaves: list) -> list:
+    """Build a balanced polish-notation AND tree over the given leaves.
+
+    Used to construct tests that need many leaves without exceeding
+    the depth limit. log2(n) depth instead of n-1.
+    """
+    if not leaves:
+        return []
+    if len(leaves) == 1:
+        return [leaves[0]]
+    mid = len(leaves) // 2
+    return ["&"] + _balanced_and(leaves[:mid]) + _balanced_and(leaves[mid:])
 
     def test_validate_invalid_boolean_op(self) -> None:
         with pytest.raises(DomainValidationError, match="Invalid boolean operator"):

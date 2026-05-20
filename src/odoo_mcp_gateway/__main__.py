@@ -42,9 +42,31 @@ async def _run_streamable_http(server: FastMCP, settings: Settings) -> None:
     from starlette.middleware import Middleware
 
     from odoo_mcp_gateway.core.auth.middleware import SessionResolverMiddleware
+    from odoo_mcp_gateway.core.observability import (
+        MetricsRegistry,
+        build_health_routes,
+        build_metrics_route,
+    )
 
     starlette_app = server.streamable_http_app()
     starlette_app.user_middleware.append(Middleware(SessionResolverMiddleware))
+
+    # Mount /health, /ready, and (if prometheus_client is installed)
+    # /metrics. The gateway was stashed on the server in create_server
+    # so we can hand it to the health probes without plumbing.
+    gateway = getattr(server, "_odoo_gateway", None)
+    if gateway is not None:
+        for route in build_health_routes(gateway):
+            starlette_app.router.routes.append(route)
+    metrics_registry = MetricsRegistry()
+    metrics_route = build_metrics_route(metrics_registry)
+    if metrics_route is not None:
+        starlette_app.router.routes.append(metrics_route)
+        # Stash the registry on the server so future call sites (Sprint 5
+        # tracing wiring) can record observations without an additional
+        # plumbing hop.
+        server._metrics_registry = metrics_registry  # type: ignore[attr-defined]
+
     # Force re-build of the middleware stack on next request so our
     # appended middleware actually appears in the chain. Starlette
     # caches the built stack lazily; we invalidate by setting it to
@@ -69,6 +91,13 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    # Configure structlog if available — emits JSON to stdout with
+    # auto-injected ContextVars (mcp_session_id, trace_id). No-op
+    # when the [observability] extra isn't installed.
+    from odoo_mcp_gateway.core.observability import configure_structlog
+
+    configure_structlog()
+
     logger.info(
         "Starting odoo-mcp-gateway v%s (transport=%s)",
         __version__,

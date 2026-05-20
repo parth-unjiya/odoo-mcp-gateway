@@ -445,4 +445,26 @@ def create_server(settings: Settings) -> FastMCP:
     if activated:
         logger.info("Activated plugins: %s", ", ".join(activated))
 
+    # Attach MCP tool annotations (readOnlyHint / destructiveHint /
+    # idempotentHint / openWorldHint) to every registered tool. This
+    # runs LAST so it covers core tools + plugin tools in one pass.
+    # See tools/annotations.py for the per-tool annotation map.
+    from odoo_mcp_gateway.tools.annotations import apply_pending_annotations
+
+    annotation_report = apply_pending_annotations(server)
+    missing = [
+        n for n, status in annotation_report.items() if status == "missing_from_map"
+    ]
+    if missing:
+        logger.warning(
+            "Tools registered without annotation entries (add to "
+            "tools/annotations.py): %s",
+            ", ".join(sorted(missing)),
+        )
+
+    # Stash the gateway on the server so callers (notably the
+    # HTTP-transport runner in __main__.py) can pull it out without
+    # plumbing it through every function signature.
+    server._odoo_gateway = gateway  # type: ignore[attr-defined]
+
     return server

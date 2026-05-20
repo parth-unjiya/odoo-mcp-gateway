@@ -53,6 +53,19 @@ dev = [
     "types-pyyaml>=6.0",
     "types-defusedxml>=0.7",
 ]
+# Observability stack — optional. Install with
+# ``pip install odoo-mcp-gateway[observability]`` to enable
+# Prometheus /metrics, structured JSON logs via structlog, and the
+# baseline OpenTelemetry API (full tracing exporter wiring lands in
+# Sprint 5). Without this extra the gateway logs via stdlib logging
+# and the /metrics route is omitted.
+observability = [
+    "prometheus-client>=0.20",
+    "structlog>=24.1",
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-instrumentation-httpx>=0.46b0",
+]
 
 [project.entry-points."odoo_mcp_gateway.plugins"]
 hr = "odoo_mcp_gateway.plugins.core.hr:HRPlugin"
