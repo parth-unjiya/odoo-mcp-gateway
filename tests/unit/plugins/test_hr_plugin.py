@@ -466,10 +466,72 @@ class TestGetMyProfile:
         ]
         result = await tools["get_my_profile"]()
         assert "No employee profile found" in result["error"]
+        # UAT LOW-2 (Odoo 19): hint guides non-HR-linked users.
+        assert "hint" in result
+        assert "hr.employee" in result["hint"]
 
     async def test_not_authenticated(self, unauth_tools):
         result = await unauth_tools["get_my_profile"]()
         assert result["error"] == "Not authenticated"
+
+    async def test_portal_user_friendly_error_no_internal_leakage(self):
+        """UAT LOW-1 (Odoo 19) — portal users get a friendly error.
+
+        The previous response leaked ``hr.employee.public`` and the
+        missing-group XML ID. Both are minor information disclosure
+        for an external caller. The portal-detection short-circuit
+        replaces the response with stock-strings only — no internal
+        model names, no group identifiers, no Odoo internals.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from odoo_mcp_gateway.client.base import AuthResult
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+
+        portal_auth = AuthResult(
+            uid=9,
+            session_id="sess",
+            user_context={},
+            is_admin=False,
+            groups=[],
+            username="portal_test",
+            database="db",
+            group_xml_ids=["base.group_portal"],
+        )
+        ctx = MagicMock()
+        client = AsyncMock()
+        auth_mgr = MagicMock()
+        auth_mgr.get_active_client.return_value = client
+        auth_mgr.auth_result = portal_auth
+        ctx.auth_managers = {"session": auth_mgr}
+        ctx.sanitize_error = lambda exc: str(exc)
+        ctx.rate_limiter = None
+        ctx.audit_logger = None
+        ctx.rbac.check_tool_access.return_value = None
+        ctx.restrictions.check_field_write.return_value = None
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HRPlugin().register(server, ctx)
+
+        result = await captured["get_my_profile"]()
+        # Portal-friendly response.
+        assert "Profile not available for portal users" in result["error"]
+        assert "hint" in result
+        # MUST NOT leak internal model name or group XML ID.
+        full = (result["error"] + " " + result.get("hint", "")).lower()
+        assert "hr.employee.public" not in full
+        assert "group_portal" not in full
+        assert "role / member" not in full
 
 
 # ── next_month helper tests ────────────────────────────────────

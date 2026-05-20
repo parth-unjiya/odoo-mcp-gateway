@@ -608,6 +608,24 @@ class HRPlugin(OdooPlugin):
             try:
                 is_admin, user_groups = get_auth_info(context)
 
+                # UAT LOW-1 (Odoo 19): portal users hitting hr.employee
+                # leaked internal model names (``hr.employee.public``)
+                # and group XML IDs (``Role / Member``) in the raw
+                # ACL error. Surface a portal-friendly response BEFORE
+                # the read attempt — no internal models, no group
+                # names. ``is_portal_user`` is consulted from the
+                # auth_result (admin short-circuited above; both
+                # checks have to agree).
+                from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+                auth_mgr = next(iter(context.auth_managers.values()), None)
+                ar = getattr(auth_mgr, "auth_result", None) if auth_mgr else None
+                if is_portal_user(ar):
+                    return {
+                        "error": "Profile not available for portal users",
+                        "hint": "Portal users do not have an HR profile.",
+                    }
+
                 restriction_msg = context.restrictions.check_model_access(
                     "hr.employee", "read", is_admin
                 )
@@ -633,7 +651,19 @@ class HRPlugin(OdooPlugin):
                     },
                 )
                 if not records:
-                    return {"error": "No employee profile found"}
+                    # UAT LOW-2 (Odoo 19): friendlier wording for
+                    # non-HR-linked users (sales_user / project_user /
+                    # helpdesk_user etc.). The wire shape stays
+                    # ``{"error", ..., "hint", ...}`` for parity with
+                    # other gateway error responses.
+                    return {
+                        "error": "No employee profile found",
+                        "hint": (
+                            "Your user account is not linked to an "
+                            "hr.employee record. Ask HR to create one "
+                            "if you need attendance/leave features."
+                        ),
+                    }
 
                 filtered = context.rbac.filter_response_fields(
                     records, "hr.employee", user_groups, is_admin
