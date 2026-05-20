@@ -44,6 +44,7 @@ class ConfigurationError(Exception):
     auth.
     """
 
+
 # ContextVar for per-request session isolation in HTTP mode.
 #
 # WARNING: HTTP mode (streamable-http transport) currently has KNOWN session
@@ -578,6 +579,16 @@ def create_server(settings: Settings) -> FastMCP:
     activated = plugin_registry.activate(server, gateway)
     if activated:
         logger.info("Activated plugins: %s", ", ".join(activated))
+
+    # Audit fix #4: install the plugin lifecycle middleware so
+    # ``pre_call`` and ``post_call`` hooks actually fire around every
+    # tool invocation. Without this, plugins implementing those hooks
+    # would never be reached. Install AFTER activation so the
+    # registered tools' call_tool wrapper sees the post-activation
+    # plugin set.
+    from odoo_mcp_gateway.core.plugin_middleware import install_plugin_middleware
+
+    install_plugin_middleware(server, plugin_registry, gateway)
 
     # Attach MCP tool annotations (readOnlyHint / destructiveHint /
     # idempotentHint / openWorldHint) to every registered tool. This

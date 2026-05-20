@@ -24,8 +24,8 @@ from pydantic import SecretStr
 
 from odoo_mcp_gateway.config import Settings
 from odoo_mcp_gateway.core.auth.oauth_verifier import (
-    CompositeTokenVerifier,
     OAUTH_AVAILABLE,
+    CompositeTokenVerifier,
     OAuthJwtVerifier,
 )
 from odoo_mcp_gateway.core.auth.token_verifier import OdooTokenVerifier
@@ -105,7 +105,8 @@ class TestOAuthEnabled:
         server = _build_fastmcp(settings, gateway)
         verifier = _extract_verifier(server)
         assert isinstance(verifier, CompositeTokenVerifier), (
-            f"OAuth-enabled must wire CompositeTokenVerifier, got {type(verifier).__name__}"
+            f"OAuth-enabled must wire CompositeTokenVerifier, "
+            f"got {type(verifier).__name__}"
         )
         # The composite must contain BOTH delegates so opaque tokens
         # keep working alongside JWTs.

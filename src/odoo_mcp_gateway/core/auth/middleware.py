@@ -135,13 +135,10 @@ def _derive_http_client_id(scope: Scope, settings: object | None) -> str | None:
         for raw_name, raw_value in headers:
             try:
                 name = raw_name.decode("latin-1").lower()
-            except Exception:
+                xff = raw_value.decode("latin-1") if name == "x-forwarded-for" else None
+            except Exception:  # noqa: S112 - malformed header, skip silently
                 continue
-            if name != "x-forwarded-for":
-                continue
-            try:
-                xff = raw_value.decode("latin-1")
-            except Exception:
+            if xff is None:
                 continue
             # XFF is "client, proxy1, proxy2". First entry is the
             # original client.

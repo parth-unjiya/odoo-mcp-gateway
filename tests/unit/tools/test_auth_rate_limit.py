@@ -170,12 +170,12 @@ class TestPerIpIsolation:
         assert gateway.login_ip_rate_limiter._failures[ip_a][0] == 4
         assert gateway.login_ip_rate_limiter._failures[ip_b][0] == 4
         # Neither IP should be locked out at 4 failures (threshold=30).
-        assert (
-            gateway.login_ip_rate_limiter.check_allowed(ip_a) is None
-        ), "IP A should not be locked out at 4 failures"
-        assert (
-            gateway.login_ip_rate_limiter.check_allowed(ip_b) is None
-        ), "IP B should not be locked out at 4 failures"
+        assert gateway.login_ip_rate_limiter.check_allowed(ip_a) is None, (
+            "IP A should not be locked out at 4 failures"
+        )
+        assert gateway.login_ip_rate_limiter.check_allowed(ip_b) is None, (
+            "IP B should not be locked out at 4 failures"
+        )
 
     async def test_one_ip_30_failures_trips_only_that_ip(self) -> None:
         """One IP failing 30 times must lock out THAT IP only, not bystanders.
@@ -254,8 +254,7 @@ class TestPerIpIsolation:
             resp = await _run_with_http_client(bystander, _good)
 
         assert "error" not in resp, (
-            f"Bystander login should not be blocked by attacker lockout, "
-            f"got: {resp!r}"
+            f"Bystander login should not be blocked by attacker lockout, got: {resp!r}"
         )
         assert resp["uid"] == 42
 
@@ -329,9 +328,10 @@ class TestStdioFallback:
                 database="testdb",
             )
 
-        assert (
-            self._stdio_key() in gateway.login_ip_rate_limiter._failures
-        ), "stdio fallback must still record under stdio:<pid> when HTTP context absent"
+        assert self._stdio_key() in gateway.login_ip_rate_limiter._failures, (
+            "stdio fallback must still record under stdio:<pid> "
+            "when HTTP context absent"
+        )
 
     async def test_session_key_is_not_used_for_source_id(self) -> None:
         """Even with a session key set, the source bucket must NOT use it.

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Major release — enterprise multi-user HTTP transport, OAuth 2.1 bearer auth, Plugin SDK 1.0, observability stack, and 8 new MCP-spec capabilities. **Strict backward-compat**: every v0.2.x stdio user upgrades with **zero config changes**.
 
+### Pre-release audit fixes (this branch)
+
+Four blockers caught by the pre-release audit and fixed inline before tagging:
+
+1. **HTTP-mode login rate limiter now scoped per remote IP.** A new `_current_http_client` ContextVar (set by `SessionResolverMiddleware` from `scope["client"]`, or the first hop of `X-Forwarded-For` when `MCP_TRUST_PROXY=true`) is the source key for the `LoginIpRateLimiter`. Before, every failed login from every peer collided into a single per-process bucket, so 30 bad-password attempts from any attacker locked out every legitimate caller for 15 min.
+2. **`/metrics` now requires bearer auth by default.** New env vars `MCP_METRICS_TOKEN` + `MCP_METRICS_REQUIRE_AUTH=true` (default ON). Secure-by-default with a loud 503 when auth is required but no token has been provisioned. Operators behind a network ACL can flip `MCP_METRICS_REQUIRE_AUTH=false`. `/health` and `/ready` stay anonymous (load-balancer probes).
+3. **OAuth verifier now actually wired into `_build_fastmcp`.** New env vars `MCP_OAUTH_ENABLED`, `MCP_OAUTH_ISSUER`, `MCP_OAUTH_AUDIENCE`, `MCP_OAUTH_JWKS_URI`, `MCP_OAUTH_REQUIRED_SCOPES`. When enabled, the gateway accepts BOTH opaque login-issued tokens AND IdP-issued JWTs via `CompositeTokenVerifier`. Fail-fast `ConfigurationError` at startup when enabled without issuer/audience.
+4. **Plugin lifecycle hooks now fire end-to-end.** Previously `register()` was the only hook called: `pre_register` / `post_register` / `pre_call` / `post_call` / `on_session_close` were all dead code despite the dispatcher methods existing. New `PluginLifecycleMiddleware` mounted on `FastMCP` brackets every tool call with `dispatch_pre_call` / `dispatch_post_call`; session eviction in `tools/auth.py` now calls `dispatch_on_session_close`; `PluginRegistry.activate()` brackets each plugin's `register()` with `pre_register` / `post_register`. `on_external_event` remains SDK contract only — it's operator-driven and the gateway calls no internal trigger; operators wanting webhook-style fan-out can call `dispatch_on_external_event` directly from plugin code (v0.4.0 wires the Odoo-bus listener).
+
 ### Highlights
 
 - **Streamable HTTP transport** with bearer-token auth, per-request session middleware via ContextVar + ASGI, and `asyncio.Lock`-serialised session swaps.

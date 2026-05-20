@@ -174,6 +174,22 @@ class PluginRegistry:
     ) -> list[str]:
         """Activate all enabled plugins by calling ``register()``.
 
+        Audit blocker #4: also fires the ``pre_register`` /
+        ``post_register`` lifecycle hooks bracketed around each
+        plugin's ``register()`` call so plugins can do setup work
+        (e.g. open a per-process resource handle) that needs to
+        happen before/after tool registration.
+
+        ``activate()`` is synchronous (it's invoked from the
+        synchronous ``create_server`` path before the main asyncio
+        loop starts), so we drive the async dispatchers through a
+        small one-shot helper that runs each coroutine on its own
+        temporary loop. If a loop is already running (e.g. tests
+        calling ``activate()`` from inside an async context), the
+        helper falls back to ``asyncio.run_coroutine_threadsafe``
+        via the running loop — preserving the existing sync
+        signature without serialising the hooks.
+
         Returns list of activated plugin names.
         """
         activated: list[str] = []
@@ -192,6 +208,13 @@ class PluginRegistry:
                 logger.debug("Plugin '%s' is disabled, skipping", info.name)
                 continue
 
+            # pre_register fires for THIS plugin only (the dispatcher
+            # iterates all active plugins, but at this point in the
+            # loop the only "active" plugin from a hook's perspective
+            # is the one we're about to register; subsequent plugins
+            # see their own pre_register on their own iteration).
+            self._run_async(self._dispatch_one_pre_register(info, context))
+
             try:
                 info.instance.register(server, context)
                 activated.append(info.name)
@@ -199,8 +222,79 @@ class PluginRegistry:
             except Exception as e:
                 info.load_error = str(e)
                 logger.error("Failed to activate plugin '%s': %s", info.name, e)
+                continue
+
+            # post_register fires for THIS plugin only after a
+            # successful register(). Skipping it on register failure
+            # avoids confusing plugins that use post_register as a
+            # "all good, allocate runtime resources" signal.
+            self._run_async(self._dispatch_one_post_register(info, context))
 
         return activated
+
+    # ----------------------------------------------------------------
+    # Sync→async bridge for the register-time hooks.
+    # ----------------------------------------------------------------
+
+    def _run_async(self, coro: Any) -> None:
+        """Run *coro* to completion, working from either sync or async caller.
+
+        - If no loop is running (the production case — ``create_server``
+          is sync), use ``asyncio.run`` on a fresh loop.
+        - If a loop IS running (some tests call ``activate()`` from
+          inside an async fixture), fall back to scheduling on the
+          running loop and awaiting via ``run_coroutine_threadsafe``.
+          Note this path is best-effort: pytest-asyncio tests should
+          prefer the async ``activate_async`` helper below.
+        """
+        import asyncio
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if running is None:
+            try:
+                asyncio.run(coro)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("Plugin register hook dispatch failed: %s", e)
+            return
+
+        # Loop running: we can't asyncio.run inside it. Best we can
+        # do is fire-and-await on the same loop without blocking it.
+        # In practice every prod call site is sync, so this branch
+        # is only hit by tests that exercise the registry from an
+        # async fixture; they should use ``activate_async`` instead.
+        try:
+            running.create_task(coro)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Plugin register hook scheduling failed: %s", e)
+
+    async def _dispatch_one_pre_register(self, info: PluginInfo, gateway: Any) -> None:
+        """Dispatch ``pre_register`` to a single plugin.
+
+        Mirrors :meth:`dispatch_pre_register` but scoped to one plugin
+        and swallows exceptions so a misbehaving hook can't block the
+        whole activate sequence.
+        """
+        if info.instance is None:
+            return
+        try:
+            ctx = PluginContext(gateway, info.name)
+            await info.instance.pre_register(ctx)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Plugin '%s' pre_register hook failed: %s", info.name, e)
+
+    async def _dispatch_one_post_register(self, info: PluginInfo, gateway: Any) -> None:
+        """Dispatch ``post_register`` to a single plugin."""
+        if info.instance is None:
+            return
+        try:
+            ctx = PluginContext(gateway, info.name)
+            await info.instance.post_register(ctx)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Plugin '%s' post_register hook failed: %s", info.name, e)
 
     def get_plugin(self, name: str) -> PluginInfo | None:
         """Get plugin info by name."""

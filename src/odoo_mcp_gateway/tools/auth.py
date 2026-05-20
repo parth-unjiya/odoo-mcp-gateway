@@ -55,6 +55,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _safe_dispatch_session_close(
+    gateway: GatewayContext, session_key: str
+) -> None:
+    """Fire ``on_session_close`` on every plugin, defensively.
+
+    Plugins may or may not be wired up on the gateway (depends on
+    construction path — tests sometimes skip the registry). We
+    tolerate the missing attribute silently. Per-plugin failures
+    are already isolated inside ``PluginRegistry.dispatch_on_session_close``.
+
+    The eviction caller is NOT blocked by a misbehaving plugin —
+    any registry-level surprise is caught and logged so the parent
+    eviction flow still completes.
+    """
+    registry = getattr(gateway, "plugin_registry", None)
+    if registry is None:
+        return
+    try:
+        await registry.dispatch_on_session_close(gateway, session_key)
+    except Exception:  # pragma: no cover - belt+braces
+        logger.debug(
+            "Plugin registry dispatch_on_session_close failed for %s",
+            session_key,
+            exc_info=True,
+        )
+
+
 def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
     """Register authentication tools on the server."""
 
@@ -166,6 +193,14 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
                         await prior_mgr.close()
                     except Exception:
                         logger.debug("Failed to close prior auth manager %s", old_key)
+                    # Audit fix #4: notify plugins that this session is
+                    # gone so they can release per-session state (e.g.
+                    # cached field maps, idempotency tokens). Wrapped in
+                    # a try/except — the registry's own dispatcher
+                    # already isolates per-plugin failures, this outer
+                    # layer protects against a registry-level surprise
+                    # (e.g. plugin_registry attribute not yet set).
+                    await _safe_dispatch_session_close(gateway, old_key)
                     logger.info(
                         "Closed prior session %s — replaced by %s "
                         "(single-user-per-process)",
@@ -181,6 +216,9 @@ def register_auth_tools(server: FastMCP, gateway: GatewayContext) -> None:
                         await existing_mgr.close()
                     except Exception:
                         logger.debug("Failed to close old auth manager")
+                    # Also fire on_session_close on re-login — the old
+                    # AuthManager is logically being evicted.
+                    await _safe_dispatch_session_close(gateway, session_key)
                 gateway.auth_managers[session_key] = auth_mgr
                 auth_mgr.register_session(session_key)
                 set_current_session_key(session_key)
