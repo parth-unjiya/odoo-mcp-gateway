@@ -13,7 +13,7 @@ If you discover a security vulnerability in odoo-mcp-gateway, please report it r
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email: **parth.unjiya@spaceo.in**
+Instead, please email: **parthunjia@gmail.com**
 
 Include:
 - Description of the vulnerability

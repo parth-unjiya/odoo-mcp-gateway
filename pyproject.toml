@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "odoo-mcp-gateway"
-version = "0.3.1"
+version = "0.3.2"
 description = "Security-first, version-agnostic MCP gateway for Odoo 17/18/19 — works with stock and custom modules via YAML configuration"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "Parth Unjiya", email = "parth.unjiya@spaceo.in" },
+    { name = "parth-unjiya", email = "parthunjia@gmail.com" },
 ]
 keywords = ["odoo", "mcp", "gateway", "erp", "ai"]
 classifiers = [

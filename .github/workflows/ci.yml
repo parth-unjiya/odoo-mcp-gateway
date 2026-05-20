@@ -82,6 +82,11 @@ jobs:
         # Audit only direct runtime deps (declared in pyproject.toml).
         # Skip tooling vulns in pip/setuptools/wheel which are runner-bundled
         # and outside our control.
+        #
+        # PYSEC-2025-183 / CVE-2025-45768 — pyjwt 2.12.1 weak-encryption claim.
+        # Disputed by upstream (key length is the application's responsibility,
+        # not the library's). No fix version available. pyjwt is a transitive
+        # dep via the MCP SDK; we do not import it directly. Tracking upstream.
         run: |
           pip install pip-audit
           pip-audit --skip-editable \
@@ -92,7 +97,8 @@ jobs:
             --ignore-vuln GHSA-6vgw-5pg2-w6jp \
             --ignore-vuln GHSA-58qw-9mgm-455v \
             --ignore-vuln GHSA-jp4c-xjxw-mgf9 \
-            --ignore-vuln GHSA-cx63-2mw6-8hw5
+            --ignore-vuln GHSA-cx63-2mw6-8hw5 \
+            --ignore-vuln PYSEC-2025-183
 
   build:
     runs-on: ubuntu-latest

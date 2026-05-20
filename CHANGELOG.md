@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-05-20
+
+### Changed
+
+- **Project author identity** updated from `Parth Unjiya
+  <parth.unjiya@spaceo.in>` to `parth-unjiya <parthunjia@gmail.com>`
+  to match the maintainer's GitHub identity for this OSS project.
+  Changes: `pyproject.toml` `authors`, `SECURITY.md` disclosure
+  address. Added `.mailmap` so historical commit displays unify under
+  the new identity on GitHub.
+- **CI / security audit** now ignores `PYSEC-2025-183` /
+  `CVE-2025-45768` — a disputed weak-encryption claim against
+  `pyjwt`. Upstream's position is that key-length enforcement is the
+  consuming application's responsibility, and no fix release exists.
+  `pyjwt` reaches us transitively through the MCP SDK; we do not
+  import it directly.
+
+### Not changed
+
+- No source code changes. v0.3.2 is metadata-only over v0.3.1.
+
 ## [0.3.1] - 2026-05-20
 
 ### Fixed
