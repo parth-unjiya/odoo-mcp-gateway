@@ -488,3 +488,159 @@ async def test_stock_picking_not_in_config() -> None:
     m = registry.get_model("stock.picking")
     assert m is not None
     assert m.access_level == AccessLevel.ADMIN_ONLY
+
+
+# ------------------------------------------------------------------
+# v0.3.3 follow-up MED — per-session cache scoping (parity with
+# field_inspector). ``ir.model.search_read`` is filtered by Odoo's
+# per-user ACLs, so the discovered map must be cached per session.
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discover_scoped_per_session_key() -> None:
+    """Two distinct session_keys produce 2 cache entries."""
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    registry = _make_registry()
+
+    set_current_session_key("admin")
+    try:
+        admin_records = _load_ir_model_records()
+        await registry.discover(_make_client(admin_records))
+        assert registry.get_model("res.partner") is not None
+    finally:
+        set_current_session_key(None)
+
+    set_current_session_key("portal")
+    try:
+        # The portal session's discovery sees a different (tighter)
+        # model list — emulates Odoo's ir.model.access filtering.
+        await registry.discover(_make_client([]))
+        # No models discovered for portal → empty registry.
+        assert registry.get_model("res.partner") is None
+    finally:
+        set_current_session_key(None)
+
+    # And switching back to admin shows the admin's wider list again.
+    set_current_session_key("admin")
+    try:
+        assert registry.get_model("res.partner") is not None
+    finally:
+        set_current_session_key(None)
+
+
+@pytest.mark.asyncio
+async def test_has_discovered_returns_false_for_other_sessions() -> None:
+    """``has_discovered`` must report fresh-or-stale per session,
+    not globally."""
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    registry = _make_registry()
+
+    set_current_session_key("admin")
+    try:
+        await registry.discover(_make_client())
+        assert registry.has_discovered() is True
+    finally:
+        set_current_session_key(None)
+
+    set_current_session_key("portal")
+    try:
+        # Portal session was never discovered → False.
+        assert registry.has_discovered() is False
+    finally:
+        set_current_session_key(None)
+
+
+@pytest.mark.asyncio
+async def test_has_discovered_ttl_expiry() -> None:
+    """After TTL elapses ``has_discovered`` returns False so the next
+    list_models call re-discovers."""
+    import time as _time
+    from unittest.mock import patch
+
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    registry = _make_registry()
+    registry._cache_ttl = 10  # type: ignore[attr-defined]
+
+    set_current_session_key("admin")
+    try:
+        await registry.discover(_make_client())
+        assert registry.has_discovered() is True
+
+        original_monotonic = _time.monotonic
+        with patch(
+            "odoo_mcp_gateway.core.discovery.model_registry.time.monotonic",
+            side_effect=lambda: original_monotonic() + 20,
+        ):
+            assert registry.has_discovered() is False
+    finally:
+        set_current_session_key(None)
+
+
+@pytest.mark.asyncio
+async def test_stdio_mode_keeps_single_entry() -> None:
+    """When no ContextVar is bound, repeated discoveries collapse to a
+    single cache entry — historical stdio behaviour preserved."""
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    registry = _make_registry()
+    set_current_session_key(None)
+    await registry.discover(_make_client())
+    assert registry.has_discovered() is True
+    # Issue a second discover() with a different client — entry is replaced.
+    await registry.discover(_make_client([]))
+    # Same (None) key — single entry, latest wins.
+    assert registry.get_model("res.partner") is None
+
+
+@pytest.mark.asyncio
+async def test_invalidate_clears_only_current_session() -> None:
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    registry = _make_registry()
+
+    set_current_session_key("admin")
+    try:
+        await registry.discover(_make_client())
+    finally:
+        set_current_session_key(None)
+
+    set_current_session_key("portal")
+    try:
+        await registry.discover(_make_client())
+        registry.invalidate()  # current session = portal
+        assert registry.has_discovered() is False
+    finally:
+        set_current_session_key(None)
+
+    set_current_session_key("admin")
+    try:
+        # Admin entry survived portal's invalidation.
+        assert registry.has_discovered() is True
+    finally:
+        set_current_session_key(None)
+
+
+@pytest.mark.asyncio
+async def test_invalidate_wildcard_clears_all_sessions() -> None:
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    registry = _make_registry()
+
+    for key in ("admin", "portal"):
+        set_current_session_key(key)
+        try:
+            await registry.discover(_make_client())
+        finally:
+            set_current_session_key(None)
+
+    registry.invalidate("*")
+    for key in ("admin", "portal"):
+        set_current_session_key(key)
+        try:
+            assert registry.has_discovered() is False
+        finally:
+            set_current_session_key(None)

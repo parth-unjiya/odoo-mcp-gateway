@@ -278,10 +278,26 @@ class SalesPlugin(OdooPlugin):
                 if isinstance(method_msg, str):
                     return {"error": method_msg}
 
-                # IDOR protection: scope to current user unless admin
+                # v0.3.3 HIGH-1: previously this lookup added
+                # ``["user_id", "=", uid]`` for non-admin callers, masking
+                # any quotation the user could read via ``search_read``
+                # (e.g. a ``sales_team.group_sale_manager`` confirming a
+                # team member's quotation) as "Order not found". That
+                # contradicted Odoo's own ACL surface and gave a confusing
+                # 404-style error to a user whose role legitimately
+                # allowed the operation.  This mirrors the helpdesk /
+                # project fix from commit 7d36663 (UAT HIGH-1).
+                #
+                # We now defer entirely to Odoo's ``ir.rule`` for read
+                # visibility: if ``search_read`` returns the record, the
+                # caller has read access.  If the subsequent
+                # ``action_confirm`` (a write-style transition) fails due
+                # to a write-ACL restriction, Odoo's error is surfaced
+                # verbatim (post-sanitisation) rather than masked as a
+                # not-found.  Read-denied and non-existent both produce
+                # the identical "Order not found" message so attackers
+                # cannot enumerate order IDs they cannot read.
                 domain: list[Any] = [["id", "=", order_id]]
-                if not is_admin:
-                    domain.append(["user_id", "=", uid])
 
                 # Verify order exists and is in draft/sent state
                 orders = await client.execute_kw(

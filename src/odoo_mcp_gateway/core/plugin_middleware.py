@@ -1,10 +1,13 @@
 """Plugin lifecycle middleware for FastMCP tool calls (audit blocker #4).
 
-The Plugin SDK 1.0 (Sprint 3) exposes six lifecycle hooks on
-``OdooPlugin`` — ``pre_register``, ``post_register``, ``pre_call``,
-``post_call``, ``on_session_close``, ``on_external_event`` — and the
-``PluginRegistry`` provides ``dispatch_*`` helpers for each. However,
-the gateway never actually CALLED ``dispatch_pre_call`` or
+The Plugin SDK 1.0 (Sprint 3) exposes seven lifecycle hooks on
+``OdooPlugin`` — ``pre_register``, ``register``, ``post_register``,
+``pre_call``, ``post_call``, ``on_session_close``, and
+``on_external_event`` — and the ``PluginRegistry`` provides
+``dispatch_*`` helpers for the async ones.  ``on_external_event`` is
+reserved for the v0.4.0 webhook stack (documented in
+``plugins/sdk.py``) but shipped now so plugin authors can prepare.
+However, the gateway never actually CALLED ``dispatch_pre_call`` or
 ``dispatch_post_call`` around tool invocations, and
 ``dispatch_on_session_close`` was never fired when a session was
 evicted by single-user-per-process enforcement.

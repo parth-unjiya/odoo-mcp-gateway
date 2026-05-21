@@ -195,3 +195,75 @@ class TestSecurityGateDefaultSessionId:
         gateway = _mock_gateway(uid=1)
         await security_gate(gateway, "search_read")
         gateway.rate_limiter.check.assert_called_once_with("default", is_write=False)
+
+
+class TestSecurityGateContextVarRouting:
+    """UAT v0.3.3 MED-2: ensure ``security_gate`` resolves the auth
+    manager via the ``_current_session_key`` ContextVar instead of
+    blindly grabbing the first manager in the dict. Without this, a
+    stale prior manager (empty groups, partial state) at the head of
+    insertion order silently shadowed the actually-authenticated
+    session, producing spurious "Tool requires base.group_system"
+    errors immediately after login.
+    """
+
+    async def test_uses_contextvar_bound_manager_not_first_in_dict(self) -> None:
+        from odoo_mcp_gateway.server import set_current_session_key
+
+        # Build a gateway with TWO managers: a STALE one at the head
+        # (empty groups, no admin), and the LIVE one keyed by session
+        # ``live``. Without the contextvar fix, the gate would read
+        # ``stale``'s empty groups and reject the admin-only tool.
+        gateway = MagicMock()
+        gateway.rate_limiter.check.return_value = (True, "")
+        gateway.rbac.check_tool_access.side_effect = (
+            lambda tool_name, user_groups, is_admin: (
+                None
+                if is_admin
+                else "Tool 'execute_method' requires one of: base.group_system"
+            )
+        )
+
+        stale_result = MagicMock()
+        stale_result.groups = []
+        stale_result.is_admin = False
+        stale_result.uid = 99
+        stale_result.username = "stale"
+        stale_mgr = MagicMock()
+        stale_mgr.auth_result = stale_result
+
+        live_result = MagicMock()
+        live_result.groups = ["base.group_system"]
+        live_result.is_admin = True
+        live_result.uid = 2
+        live_result.username = "admin"
+        live_mgr = MagicMock()
+        live_mgr.auth_result = live_result
+
+        # Insertion order: stale first, live second. ``next(iter(...))``
+        # would return stale — exactly the bug condition.
+        gateway.auth_managers = {"stale": stale_mgr, "live": live_mgr}
+
+        try:
+            set_current_session_key("live")
+            result = await security_gate(gateway, "execute_method", "live")
+        finally:
+            set_current_session_key(None)
+
+        # With the contextvar honored, security_gate sees admin → no
+        # block. Without the fix, it would have surfaced the
+        # "requires base.group_system" rejection.
+        assert result is None
+
+    async def test_falls_back_to_single_session_when_contextvar_unset(self) -> None:
+        # Stdio-mode behaviour: no contextvar, exactly one manager. The
+        # fallback path must still resolve correctly.
+        from odoo_mcp_gateway.server import set_current_session_key
+
+        gateway = _mock_gateway(uid=1, login="solo", groups=["base.group_user"])
+        try:
+            set_current_session_key(None)
+            result = await security_gate(gateway, "search_read", "anything")
+        finally:
+            set_current_session_key(None)
+        assert result is None

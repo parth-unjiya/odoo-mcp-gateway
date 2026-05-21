@@ -218,13 +218,38 @@ async def security_gate(
     Returns None if allowed, or an error message string if blocked.
     Call this at the start of every tool handler.
     """
-    # Extract user context from auth_managers (not top-level attrs)
+    # Extract user context from auth_managers (not top-level attrs).
+    #
+    # UAT v0.3.3 MED-2 (Odoo 19): previously this fell through to
+    # ``next(iter(gateway.auth_managers.values()))`` unconditionally,
+    # which (a) returned the WRONG manager when more than one session
+    # existed and (b) caused intermittent "Tool requires group X" RBAC
+    # failures immediately after login when an evicted prior manager
+    # with empty groups happened to remain at the head of the dict.
+    # The fix mirrors plugins.core.helpers._resolve_auth_manager:
+    # prefer the contextvar-bound session, then single-session
+    # fallback, then surface "Not authenticated".
     _user_groups: list[str] = []
     _is_admin: bool = False
     _user_id: int = 0
     _user_login: str = "unknown"
     if hasattr(gateway, "auth_managers") and gateway.auth_managers:
-        _mgr = next(iter(gateway.auth_managers.values()), None)
+        _mgr: Any = None
+        # Late-bound import: ``server`` and the security middleware
+        # share a module dependency we don't want to create at import
+        # time (server imports SecurityMiddleware). Resolving the
+        # current-session helper lazily keeps the cycle broken.
+        try:
+            from odoo_mcp_gateway.server import get_current_session_key
+
+            _key = get_current_session_key()
+        except Exception:
+            _key = None
+        if _key is not None:
+            _mgr = gateway.auth_managers.get(_key)
+        # Fallback: stdio mode single-session resolution.
+        if _mgr is None and len(gateway.auth_managers) == 1:
+            _mgr = next(iter(gateway.auth_managers.values()))
         if _mgr is not None:
             _result = getattr(_mgr, "auth_result", None)
             if _result is not None:

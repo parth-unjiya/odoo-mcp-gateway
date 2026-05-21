@@ -81,7 +81,7 @@ class TestGetDefaults:
         gateway = make_gateway(mock_client=mock_client)
 
         # Pre-populate field cache
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(

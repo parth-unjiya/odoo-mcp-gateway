@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .models import AccessLevel, ModelInfo
+
+# Cache key for per-session model maps.  ``session_key`` mirrors the
+# ContextVar-bound key used by :class:`FieldInspector`; ``None`` denotes
+# stdio / single-user mode and keeps the historical single-entry
+# behaviour.  v0.3.3 follow-up: ``ir.model.search_read`` is scoped by
+# Odoo's per-user ``ir.model.access`` rules, so a model list discovered
+# by an admin must not be served to a portal user on a multi-tenant
+# HTTP deployment.
+_SessionKey = str | None
+
+# Sentinel used in default-parameter slots that need a distinct "the
+# caller did not pass a value, use the current ContextVar" signal,
+# because ``None`` is a legitimate session-key value (stdio mode).
+# Use ``is`` comparison, not ``==``.
+_USE_CURRENT_SESSION: Any = object()
 
 # Known stock Odoo module prefixes
 STOCK_MODULE_PREFIXES = frozenset(
@@ -70,6 +86,7 @@ class ModelRegistry:
         self,
         model_access_config: dict[str, Any] | None = None,
         blocked_models: list[str] | None = None,
+        cache_ttl: int = 3600,
     ) -> None:
         """Initialise the registry.
 
@@ -80,17 +97,33 @@ class ModelRegistry:
             ``stock_models``, ``custom_models``.
         blocked_models:
             Models from ``restrictions.yaml`` ``always_blocked`` list.
+        cache_ttl:
+            Per-session discovery TTL in seconds.  After this many
+            seconds without re-discovery the session's entry is
+            considered stale.  Stdio mode (no session key bound) uses
+            the same TTL but keeps a single shared entry.
         """
-        self._models: dict[str, ModelInfo] = {}
+        # v0.3.3 follow-up MED: per-session map of discovered models.
+        # ``None`` is the canonical stdio / single-user key.
+        self._sessions: dict[_SessionKey, tuple[float, dict[str, ModelInfo]]] = {}
         self._config = model_access_config or {}
         self._blocked: set[str] = set(blocked_models or [])
+        self._cache_ttl = cache_ttl
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     async def discover(self, client: Any) -> None:
-        """Query ``ir.model`` for all installed models and populate the registry."""
+        """Query ``ir.model`` for all installed models and populate the
+        per-session registry entry.
+
+        The ``ir.model.search_read`` call is scoped by the active
+        session's Odoo ACLs (``ir.model.access``), so the result must
+        be cached under the calling session's key. Stdio mode keeps
+        the historical single-entry behaviour because no session key
+        is bound.
+        """
         records = await client.execute_kw(
             "ir.model",
             "search_read",
@@ -107,14 +140,15 @@ class ModelRegistry:
                 "limit": 0,
             },
         )
-        self._models.clear()
+        models: dict[str, ModelInfo] = {}
         for rec in records:
             info = self._classify_model(rec)
-            self._models[info.name] = info
+            models[info.name] = info
+        self._sessions[self._session_key()] = (time.monotonic(), models)
 
     def get_model(self, name: str) -> ModelInfo | None:
         """Return model metadata or ``None`` if unknown."""
-        return self._models.get(name)
+        return self._current_models().get(name)
 
     def get_accessible_models(self, is_admin: bool = False) -> list[ModelInfo]:
         """Return models the caller may access.
@@ -125,7 +159,7 @@ class ModelRegistry:
         allowed = {AccessLevel.FULL_CRUD, AccessLevel.READ_ONLY}
         if is_admin:
             allowed.add(AccessLevel.ADMIN_ONLY)
-        return [m for m in self._models.values() if m.access_level in allowed]
+        return [m for m in self._current_models().values() if m.access_level in allowed]
 
     def search_models(self, query: str) -> list[ModelInfo]:
         """Case-insensitive search on model name and description."""
@@ -134,20 +168,109 @@ class ModelRegistry:
         q = query.lower()
         return [
             m
-            for m in self._models.values()
+            for m in self._current_models().values()
             if q in m.name.lower() or q in m.description.lower()
         ]
 
     def is_custom_model(self, model_name: str) -> bool:
         """Return ``True`` if the model is classified as custom."""
-        model = self._models.get(model_name)
+        model = self._current_models().get(model_name)
         if model is None:
             return False
         return model.is_custom
 
+    def has_discovered(self, session_key: Any = _USE_CURRENT_SESSION) -> bool:
+        """Return ``True`` if the calling session has a fresh discovery.
+
+        ``session_key`` defaults to the :data:`_USE_CURRENT_SESSION`
+        sentinel meaning "use the current ContextVar-bound session".
+        Pass an explicit key (or ``None`` for stdio) to query a
+        specific session.  Callers in :mod:`tools.schema` use this to
+        decide whether ``discover()`` needs to fire for the current
+        session — replacing the legacy global ``_models_discovered``
+        flag.
+        """
+        if session_key is _USE_CURRENT_SESSION:
+            key: _SessionKey = self._session_key()
+        else:
+            key = session_key
+        entry = self._sessions.get(key)
+        if entry is None:
+            return False
+        ts, _ = entry
+        return (time.monotonic() - ts) < self._cache_ttl
+
+    def invalidate(self, session_key: Any = _USE_CURRENT_SESSION) -> None:
+        """Drop the cached discovery for a single session.
+
+        Default :data:`_USE_CURRENT_SESSION` evicts the current
+        ContextVar-bound session; pass ``None`` (stdio) or an explicit
+        session key to target a different entry.  Pass ``"*"`` to
+        clear every session (full reset, used by tests and reload
+        paths).
+        """
+        if session_key == "*":
+            self._sessions.clear()
+            return
+        if session_key is _USE_CURRENT_SESSION:
+            key: _SessionKey = self._session_key()
+        else:
+            key = session_key
+        self._sessions.pop(key, None)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _session_key(self) -> _SessionKey:
+        """Resolve the current MCP session key, defaulting to ``None``.
+
+        Imported locally to avoid the circular dependency between the
+        discovery layer and :mod:`odoo_mcp_gateway.server` (the same
+        pattern used by :class:`FieldInspector`).
+        """
+        try:
+            from odoo_mcp_gateway.server import get_current_session_key
+
+            return get_current_session_key()
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    def _current_models(self) -> dict[str, ModelInfo]:
+        """Return the model dict for the current session (or empty)."""
+        entry = self._sessions.get(self._session_key())
+        if entry is None:
+            return {}
+        return entry[1]
+
+    # ------------------------------------------------------------------
+    # Backwards-compatibility shim
+    #
+    # Pre-v0.3.3 callers (and a handful of tests) read/write
+    # ``self._models`` directly. We expose it as a property over the
+    # current session's entry so existing call sites keep working
+    # while the storage is migrated to the per-session map. Stdio
+    # mode (no session key bound) reads/writes the ``None`` entry,
+    # which is exactly the single-entry behaviour callers expected.
+    # ------------------------------------------------------------------
+
+    @property
+    def _models(self) -> dict[str, ModelInfo]:
+        """Current-session model dict (BC shim — prefer ``get_model`` /
+        ``get_accessible_models``)."""
+        key = self._session_key()
+        entry = self._sessions.get(key)
+        if entry is None:
+            # Materialise an empty entry so mutations on the returned
+            # dict survive (legacy code does ``registry._models[...]
+            # = ModelInfo(...)`` directly).
+            self._sessions[key] = (time.monotonic(), {})
+            entry = self._sessions[key]
+        return entry[1]
+
+    @_models.setter
+    def _models(self, value: dict[str, ModelInfo]) -> None:
+        self._sessions[self._session_key()] = (time.monotonic(), value)
 
     def _classify_model(self, model_data: dict[str, Any]) -> ModelInfo:
         """Build a ``ModelInfo`` from an ``ir.model`` record dict."""

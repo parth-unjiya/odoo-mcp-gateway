@@ -37,6 +37,17 @@ class PluginInfo:
     # at registration time. May be ``None`` for legacy plugins; those
     # are loaded with a deprecation warning.
     plugin_sdk_version: str | None = None
+    # v0.3.3 follow-up MED-3: operator-supplied alternates from
+    # ``model_access.yaml::plugin_overrides``. Empty by default;
+    # populated by ``PluginRegistry.set_plugin_overrides()`` when the
+    # gateway loads its YAML config.
+    accept_modules: list[str] = field(default_factory=list)
+    accept_models: list[str] = field(default_factory=list)
+    # Effective model name resolved from ``required_models[0]`` /
+    # ``accept_models[0]`` after override merge. Plugin tool handlers
+    # read this when they need to issue ``execute_kw`` against the
+    # actual model present on the installation (stock vs custom).
+    effective_model_name: str | None = None
 
 
 class PluginRegistry:
@@ -70,6 +81,11 @@ class PluginRegistry:
         self._plugins: dict[str, PluginInfo] = {}
         self._enabled = set(enabled_plugins) if enabled_plugins else None
         self._disabled = set(disabled_plugins) if disabled_plugins else set()
+        # v0.3.3 follow-up MED-3: operator-supplied per-plugin overrides
+        # awaiting application. ``set_plugin_overrides`` populates this
+        # at startup; ``check_requirements`` / ``register_plugin`` pick
+        # entries up as plugins become known.
+        self._pending_overrides: dict[str, tuple[list[str], list[str]]] = {}
 
     def discover(self) -> list[PluginInfo]:
         """Discover all plugins from entry_points.
@@ -115,10 +131,11 @@ class PluginRegistry:
                 plugin_class=plugin_class,
                 instance=instance if ok else None,
                 enabled=ok,
-                required_modules=instance.required_odoo_modules,
+                required_modules=list(instance.required_odoo_modules or []),
                 plugin_sdk_version=sdk_spec,
                 load_error=None if ok else message,
             )
+            self._apply_pending_overrides(info)
         except Exception as e:
             info = PluginInfo(
                 name=getattr(plugin_class, "__name__", "unknown"),
@@ -130,6 +147,62 @@ class PluginRegistry:
 
         self._plugins[info.name] = info
         return info
+
+    def _apply_pending_overrides(self, info: PluginInfo) -> None:
+        """Pull any operator-supplied overrides for *info* from the
+        pending map, then refresh the effective model name."""
+        pending = self._pending_overrides.get(info.name)
+        if pending is not None:
+            info.accept_modules, info.accept_models = pending
+        self._refresh_effective_model_name(info)
+
+    def set_plugin_overrides(
+        self,
+        overrides: dict[str, Any],
+    ) -> None:
+        """Apply YAML-supplied per-plugin module / model overrides.
+
+        Accepts the parsed ``plugin_overrides`` mapping from
+        ``model_access.yaml``.  Each entry may be either a
+        ``PluginOverride`` Pydantic model or a plain dict with
+        ``accept_modules`` / ``accept_models`` lists — both are
+        normalised here so callers don't need to import the model.
+
+        Unknown plugin names are stored anyway: a plugin entry-point
+        that isn't yet loaded (e.g. a future plugin shipped via a
+        third-party package) should still receive its operator
+        configuration when it eventually registers.  We track the
+        pending overrides in ``_pending_overrides`` so
+        ``register_plugin`` / ``discover`` can pick them up.
+
+        v0.3.3 follow-up MED-3: this is the operator's escape hatch
+        for installations where the stock Odoo module name differs
+        from the plugin's declared requirement (e.g.
+        ``odoo_website_helpdesk`` shipping ``ticket.helpdesk``).
+        """
+        self._pending_overrides = {}
+        for plugin_name, raw in (overrides or {}).items():
+            modules: list[str]
+            models: list[str]
+            if hasattr(raw, "accept_modules"):
+                modules = list(getattr(raw, "accept_modules", []) or [])
+                models = list(getattr(raw, "accept_models", []) or [])
+            elif isinstance(raw, dict):
+                modules = list(raw.get("accept_modules", []) or [])
+                models = list(raw.get("accept_models", []) or [])
+            else:
+                logger.warning(
+                    "Ignoring plugin_overrides entry for %s: unrecognised type %r",
+                    plugin_name,
+                    type(raw).__name__,
+                )
+                continue
+            self._pending_overrides[plugin_name] = (modules, models)
+            info = self._plugins.get(plugin_name)
+            if info is not None:
+                info.accept_modules = modules
+                info.accept_models = models
+                self._refresh_effective_model_name(info)
 
     async def check_requirements(
         self,
@@ -147,6 +220,15 @@ class PluginRegistry:
         -------
         list[PluginInfo]
             Plugins with ``missing_modules`` populated.
+
+        v0.3.3 follow-up MED-3: operator-supplied alternates from
+        ``model_access.yaml::plugin_overrides`` are OR-merged with the
+        plugin's declared ``required_odoo_modules``.  The plugin is
+        satisfied if ANY of the (declared ∪ accepted) modules is
+        installed.  The same OR-semantics apply to ``required_models``
+        via ``accept_models`` so a plugin querying ``helpdesk.ticket``
+        can be redirected to ``ticket.helpdesk`` on installations
+        running the custom helpdesk module.
         """
         installed_set = set(installed_modules)
         result: list[PluginInfo] = []
@@ -154,18 +236,67 @@ class PluginRegistry:
         for info in self._plugins.values():
             if info.instance is None:
                 continue
-            missing = [m for m in info.required_modules if m not in installed_set]
+            # Ensure pending overrides are applied (e.g. for plugins
+            # that registered after ``set_plugin_overrides`` was called).
+            pending = getattr(self, "_pending_overrides", {}).get(info.name)
+            already_set = info.accept_modules or info.accept_models
+            if pending is not None and not already_set:
+                info.accept_modules, info.accept_models = pending
+                self._refresh_effective_model_name(info)
+
+            declared = list(info.required_modules)
+            accepted = list(info.accept_modules)
+            if accepted:
+                # Override active: treat ``declared`` and ``accepted`` as
+                # the SAME OR-set — the plugin is satisfied if ANY
+                # member is installed. This is the v0.3.3 MED-3 path
+                # used by operators on custom Odoo modules.
+                pool = set(declared) | set(accepted)
+                satisfied = any(m in installed_set for m in pool)
+                missing = [] if satisfied else sorted(pool)
+            else:
+                # No override: legacy semantics — ALL declared modules
+                # must be installed (an empty declared list trivially
+                # satisfies).
+                missing = [m for m in declared if m not in installed_set]
+                satisfied = not missing
+
             info.missing_modules = missing
-            if missing:
+            if not satisfied:
                 info.enabled = False
-                logger.warning(
-                    "Plugin '%s' disabled: missing Odoo modules: %s",
-                    info.name,
-                    ", ".join(missing),
-                )
+                if accepted:
+                    logger.warning(
+                        "Plugin '%s' disabled: none of these Odoo modules "
+                        "are installed: %s",
+                        info.name,
+                        ", ".join(missing),
+                    )
+                else:
+                    logger.warning(
+                        "Plugin '%s' disabled: missing Odoo modules: %s",
+                        info.name,
+                        ", ".join(missing),
+                    )
             result.append(info)
 
         return result
+
+    def _refresh_effective_model_name(self, info: PluginInfo) -> None:
+        """Resolve ``info.effective_model_name`` from declared/accept lists.
+
+        Preference order: the FIRST entry of ``accept_models`` (operator
+        opt-in to a non-stock model name) wins over ``required_models[0]``.
+        Used by plugin tools that need to issue ``execute_kw`` against the
+        actual model present on the installation. Plugins that don't
+        declare ``required_models`` get ``None``.
+        """
+        if info.instance is None:
+            return
+        required_models = list(getattr(info.instance, "required_models", []) or [])
+        accept = list(info.accept_models or [])
+        info.effective_model_name = (
+            accept[0] if accept else (required_models[0] if required_models else None)
+        )
 
     def activate(
         self,
@@ -349,17 +480,19 @@ class PluginRegistry:
                     logger.warning("%s", message)
                 else:
                     logger.error("%s", message)
-            return PluginInfo(
+            info = PluginInfo(
                 name=instance.name,
                 version=instance.version,
                 description=instance.description,
                 plugin_class=plugin_class,
                 instance=instance if ok else None,
                 enabled=ok,
-                required_modules=instance.required_odoo_modules,
+                required_modules=list(instance.required_odoo_modules or []),
                 plugin_sdk_version=sdk_spec,
                 load_error=None if ok else message,
             )
+            self._apply_pending_overrides(info)
+            return info
         except Exception as e:
             logger.error("Failed to load plugin '%s': %s", name, e)
             return PluginInfo(

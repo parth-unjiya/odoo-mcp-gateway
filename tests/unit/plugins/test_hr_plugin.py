@@ -452,6 +452,12 @@ class TestGetMyProfile:
                     "parent_id": False,
                     "coach_id": False,
                     "work_location_id": False,
+                    # UAT v0.3.3 LOW-2 follow-up: user_id is now required
+                    # in the projection so the resolver can defensively
+                    # confirm the row belongs to the caller (uid=42 in
+                    # the fixture). Without this, the row is rejected
+                    # as a mismatch.
+                    "user_id": [42, "Caller"],
                 },
             ],
         ]
@@ -473,6 +479,146 @@ class TestGetMyProfile:
     async def test_not_authenticated(self, unauth_tools):
         result = await unauth_tools["get_my_profile"]()
         assert result["error"] == "Not authenticated"
+
+    async def test_helpdesk_manager_does_not_get_portal_message(self):
+        """UAT v0.3.3 MED-5 (Odoo 19) — a helpdesk_manager whose
+        ``_fetch_groups`` did not surface portal-typed XML IDs MUST
+        NOT be classified as a portal user. Previously, an internal
+        user with non-portal display-name groups was wrongly tripped
+        into the portal short-circuit and saw
+        ``"Profile not available for portal users"`` instead of the
+        canonical no-employee-found shape.
+        """
+        from odoo_mcp_gateway.client.base import AuthResult
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+
+        helpdesk_auth = AuthResult(
+            uid=20,
+            session_id="sess",
+            user_context={},
+            is_admin=False,
+            # Empty XML IDs (simulating transient _fetch_groups glitch
+            # OR a fork that doesn't surface XML IDs) but populated
+            # display-name groups for a clearly-internal user.
+            groups=["Helpdesk / Manager", "User types / Internal User"],
+            username="helpdesk_manager",
+            database="db",
+            group_xml_ids=[],
+        )
+        ctx = MagicMock()
+        client = AsyncMock()
+        auth_mgr = MagicMock()
+        auth_mgr.get_active_client.return_value = client
+        auth_mgr.auth_result = helpdesk_auth
+        ctx.auth_managers = {"session": auth_mgr}
+        ctx.sanitize_error = lambda exc: str(exc)
+        ctx.rate_limiter = None
+        ctx.audit_logger = None
+        ctx.rbac.check_tool_access.return_value = None
+        ctx.restrictions.check_field_write.return_value = None
+        ctx.restrictions.check_model_access.return_value = None
+
+        # No hr.employee linked → empty result from search_read.
+        client.execute_kw.return_value = []
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HRPlugin().register(server, ctx)
+
+        result = await captured["get_my_profile"]()
+        # MUST NOT be the portal short-circuit response.
+        assert "portal" not in (result.get("error") or "").lower()
+        # SHOULD be the canonical no-employee-found shape.
+        assert "No employee profile found" in result["error"]
+        assert "hr.employee" in result.get("hint", "")
+
+    async def test_employee_search_uses_user_id_filter(self):
+        """UAT v0.3.3 MED-5 issue 1: regression to ensure the employee
+        resolver filters by ``user_id`` strictly. A previous misroute
+        (admin's employee returned for a non-admin user) would have
+        used ``[]`` or ``[("active","=",True)]`` and returned the first
+        record. This test asserts the domain Odoo sees contains the
+        ``("user_id","=",uid)`` leaf with the CALLER's uid.
+        """
+        from odoo_mcp_gateway.client.base import AuthResult
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+
+        employee_auth = AuthResult(
+            uid=8,
+            session_id="sess",
+            user_context={},
+            is_admin=False,
+            groups=["base.group_user"],
+            username="hr_employee",
+            database="db",
+            group_xml_ids=["base.group_user"],
+        )
+        ctx = MagicMock()
+        client = AsyncMock()
+        auth_mgr = MagicMock()
+        auth_mgr.get_active_client.return_value = client
+        auth_mgr.auth_result = employee_auth
+        ctx.auth_managers = {"session": auth_mgr}
+        ctx.sanitize_error = lambda exc: str(exc)
+        ctx.rate_limiter = None
+        ctx.audit_logger = None
+        ctx.rbac.check_tool_access.return_value = None
+        ctx.restrictions.check_field_write.return_value = None
+        ctx.restrictions.check_model_access.return_value = None
+        ctx.rbac.filter_response_fields.side_effect = lambda r, *_a, **_k: r
+
+        # Return a record whose id is NOT 1 (admin's id) — proving
+        # the resolver filtered on user_id.
+        client.execute_kw.return_value = [
+            {
+                "id": 17,
+                "name": "Worker Bee",
+                "job_id": False,
+                "department_id": False,
+                "work_email": "worker@example.com",
+                "work_phone": False,
+                "parent_id": False,
+                "coach_id": False,
+                "work_location_id": False,
+                # UAT v0.3.3 LOW-2 follow-up: user_id must match caller.
+                "user_id": [8, "hr_employee"],
+            }
+        ]
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HRPlugin().register(server, ctx)
+
+        result = await captured["get_my_profile"]()
+        # The returned profile must be the worker's record (not admin's).
+        assert result["profile"]["id"] == 17
+        assert result["profile"]["name"] == "Worker Bee"
+        # Sanity: client was called with the user_id filter.
+        # search_read invocation: execute_kw("hr.employee", "search_read",
+        # [[["user_id","=",8]]], {...})
+        call_args = client.execute_kw.call_args
+        assert call_args[0][0] == "hr.employee"
+        assert call_args[0][1] == "search_read"
+        domain = call_args[0][2][0]
+        assert ["user_id", "=", 8] in domain
 
     async def test_portal_user_friendly_error_no_internal_leakage(self):
         """UAT LOW-1 (Odoo 19) — portal users get a friendly error.
@@ -531,6 +677,296 @@ class TestGetMyProfile:
         full = (result["error"] + " " + result.get("hint", "")).lower()
         assert "hr.employee.public" not in full
         assert "group_portal" not in full
+        assert "role / member" not in full
+
+    # ── UAT v0.3.3 LOW-2 follow-up (Finding #5c) ──────────────────
+    #
+    # ``sales_user`` (uid 5 on Odoo 19) has NO ``hr.employee``
+    # record. Re-UAT showed ``get_my_profile`` returning admin's
+    # employee record (id=1, "Administrator") for this caller.
+    # Two regressions are covered here:
+    #
+    # 1. Empty search_read result MUST yield the friendly
+    #    "No employee profile found" hint — never silently fall
+    #    back to any other row.
+    # 2. If Odoo returns a row whose ``user_id`` does NOT match
+    #    the caller's uid (race / ir.rule fallthrough / custom
+    #    override), the resolver MUST reject it as "no employee
+    #    found" rather than leak another user's record.
+
+    async def test_unlinked_user_no_admin_fallback(self):
+        """Finding #5c: ``sales_user``-shaped caller (internal-user
+        groups, no linked hr.employee) must receive the friendly
+        no-employee hint when ``search_read`` returns an empty list —
+        NEVER admin's record by accident.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from odoo_mcp_gateway.client.base import AuthResult
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+
+        sales_auth = AuthResult(
+            uid=5,
+            session_id="sess",
+            user_context={},
+            is_admin=False,
+            groups=["base.group_user", "sales_team.group_sale_salesman"],
+            username="sales_user",
+            database="db",
+            group_xml_ids=[
+                "base.group_user",
+                "sales_team.group_sale_salesman",
+            ],
+        )
+        ctx = MagicMock()
+        client = AsyncMock()
+        auth_mgr = MagicMock()
+        auth_mgr.get_active_client.return_value = client
+        auth_mgr.auth_result = sales_auth
+        ctx.auth_managers = {"session": auth_mgr}
+        ctx.sanitize_error = lambda exc: str(exc)
+        ctx.rate_limiter = None
+        ctx.audit_logger = None
+        ctx.rbac.check_tool_access.return_value = None
+        ctx.restrictions.check_field_write.return_value = None
+        ctx.restrictions.check_model_access.return_value = None
+
+        # The CORRECT live response for an unlinked user: empty list.
+        client.execute_kw.return_value = []
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HRPlugin().register(server, ctx)
+
+        result = await captured["get_my_profile"]()
+        # MUST be the friendly hint, NOT admin's profile.
+        assert "profile" not in result
+        assert "No employee profile found" in result["error"]
+        assert "hr.employee" in result.get("hint", "")
+        # Sanity: the search domain was strictly user_id=5.
+        call_args = client.execute_kw.call_args
+        assert call_args[0][0] == "hr.employee"
+        assert call_args[0][1] == "search_read"
+        domain = call_args[0][2][0]
+        assert ["user_id", "=", 5] in domain
+
+    async def test_user_id_mismatch_rejected(self):
+        """Finding #5c defense-in-depth: if Odoo returns a row whose
+        ``user_id`` does NOT match the caller's uid (e.g. ir.rule
+        fallthrough surfacing admin's record), the resolver MUST
+        reject the row and return the no-employee hint rather than
+        leak the mismatched profile.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from odoo_mcp_gateway.client.base import AuthResult
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+
+        sales_auth = AuthResult(
+            uid=5,
+            session_id="sess",
+            user_context={},
+            is_admin=False,
+            groups=["base.group_user"],
+            username="sales_user",
+            database="db",
+            group_xml_ids=["base.group_user"],
+        )
+        ctx = MagicMock()
+        client = AsyncMock()
+        auth_mgr = MagicMock()
+        auth_mgr.get_active_client.return_value = client
+        auth_mgr.auth_result = sales_auth
+        ctx.auth_managers = {"session": auth_mgr}
+        ctx.sanitize_error = lambda exc: str(exc)
+        ctx.rate_limiter = None
+        ctx.audit_logger = None
+        ctx.rbac.check_tool_access.return_value = None
+        ctx.restrictions.check_field_write.return_value = None
+        ctx.restrictions.check_model_access.return_value = None
+        ctx.rbac.filter_response_fields.side_effect = lambda r, *_a, **_k: r
+
+        # Pathological: Odoo returned admin's hr.employee record even
+        # though we filtered by user_id=5. Caller MUST NOT see this.
+        client.execute_kw.return_value = [
+            {
+                "id": 1,
+                "name": "Administrator",
+                "job_id": False,
+                "department_id": [1, "Administration"],
+                "work_email": "admin@example.com",
+                "work_phone": False,
+                "parent_id": False,
+                "coach_id": False,
+                "work_location_id": False,
+                "user_id": [2, "admin"],  # NOT the caller's uid (5).
+            }
+        ]
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HRPlugin().register(server, ctx)
+
+        result = await captured["get_my_profile"]()
+        # Mismatched row must NOT leak through.
+        assert "profile" not in result
+        assert "Administrator" not in str(result)
+        assert "No employee profile found" in result["error"]
+        assert "hr.employee" in result.get("hint", "")
+
+    # ── UAT v0.3.3 LOW-1 follow-up (Finding #5d, REGRESSION) ──────
+    #
+    # ``portal_test`` on Odoo 19 produced an EMPTY ``auth_result``
+    # (groups=[], group_xml_ids=[]) because of a glitch in the
+    # group-resolution path. With the tightened ``is_portal_user``
+    # (a deliberate fix for helpdesk_manager misclassification),
+    # an empty-group auth_result is no longer treated as portal,
+    # so the code fell through to read hr.employee → Odoo raised
+    # raw ACL error leaking ``hr.employee.public`` and
+    # ``Role / Member``. These tests pin the friendly-error path.
+
+    async def test_empty_group_caller_treated_as_portal(self):
+        """Finding #5d: a caller whose auth_result has BOTH empty
+        ``groups`` AND empty ``group_xml_ids`` must receive the
+        friendly portal response (not a raw ACL leak).
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from odoo_mcp_gateway.client.base import AuthResult
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+
+        empty_auth = AuthResult(
+            uid=9,
+            session_id="sess",
+            user_context={},
+            is_admin=False,
+            groups=[],
+            username="portal_test",
+            database="db",
+            group_xml_ids=[],  # NB: empty — the regression trigger.
+        )
+        ctx = MagicMock()
+        client = AsyncMock()
+        auth_mgr = MagicMock()
+        auth_mgr.get_active_client.return_value = client
+        auth_mgr.auth_result = empty_auth
+        ctx.auth_managers = {"session": auth_mgr}
+        ctx.sanitize_error = lambda exc: str(exc)
+        ctx.rate_limiter = None
+        ctx.audit_logger = None
+        ctx.rbac.check_tool_access.return_value = None
+        ctx.restrictions.check_field_write.return_value = None
+        ctx.restrictions.check_model_access.return_value = None
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HRPlugin().register(server, ctx)
+
+        result = await captured["get_my_profile"]()
+        # Friendly portal response, NO leaked Odoo internals.
+        assert "Profile not available for portal users" in result["error"]
+        assert "hint" in result
+        full = (result["error"] + " " + result.get("hint", "")).lower()
+        assert "hr.employee" not in full
+        assert "public employee" not in full
+        assert "role" not in full
+        # The Odoo read MUST NOT even have been attempted.
+        client.execute_kw.assert_not_called()
+
+    async def test_acl_leak_caught_in_exception_handler(self):
+        """Finding #5d defence-in-depth: if a caller somehow slips
+        past the early portal gate (e.g. has ``base.group_user`` set
+        but Odoo still denies ``hr.employee.public`` for some reason)
+        and Odoo raises an ACL error mentioning the internal model
+        name, the exception handler MUST convert it to the friendly
+        portal message before it reaches the wire.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from odoo_mcp_gateway.client.base import AuthResult
+        from odoo_mcp_gateway.plugins.core.hr import HRPlugin
+
+        weird_auth = AuthResult(
+            uid=99,
+            session_id="sess",
+            user_context={},
+            is_admin=False,
+            # Has an internal-user-looking group so the early
+            # broader-portal gate does NOT fire — we want to
+            # exercise the inner except clause.
+            groups=["base.group_user"],
+            username="weird_user",
+            database="db",
+            group_xml_ids=["base.group_user"],
+        )
+        ctx = MagicMock()
+        client = AsyncMock()
+        auth_mgr = MagicMock()
+        auth_mgr.get_active_client.return_value = client
+        auth_mgr.auth_result = weird_auth
+        ctx.auth_managers = {"session": auth_mgr}
+        ctx.sanitize_error = lambda exc: str(exc)
+        ctx.rate_limiter = None
+        ctx.audit_logger = None
+        ctx.rbac.check_tool_access.return_value = None
+        ctx.restrictions.check_field_write.return_value = None
+        ctx.restrictions.check_model_access.return_value = None
+
+        # Verbatim Odoo 19 raw ACL message that leaked in re-UAT.
+        client.execute_kw.side_effect = Exception(
+            "Access denied: You are not allowed to access "
+            "'Public Employee' (hr.employee.public) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Role / Member\n\nContact your administrator to "
+            "request access if necessary."
+        )
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HRPlugin().register(server, ctx)
+
+        result = await captured["get_my_profile"]()
+        # Converted to friendly response — NO raw model name leaked.
+        assert "Profile not available for portal users" in result["error"]
+        full = (result["error"] + " " + result.get("hint", "")).lower()
+        assert "hr.employee.public" not in full
+        assert "public employee" not in full
         assert "role / member" not in full
 
 

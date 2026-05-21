@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-05-21
+
+Third post-release audit (audit #3, May 2026) plus four rounds of MCP-tool UAT that surfaced an additional 9 follow-up findings. All 13 items addressed below. No source-level behaviour changes for stdio callers; HTTP multi-tenant deployments get tighter per-session isolation in three more places (model_registry, completion handler, field_inspector). A systemic sanitizer pass eliminates a class of Odoo ACL boilerplate leaks (internal model name + group XML ID + "Contact your administrator" guidance) across every MCP tool surface.
+
+### v0.3.3 candidate batch — audit #3 findings
+
+Originally landed before MCP-tool UAT (1 HIGH, 2 MEDIUM, 3 LOW from the static audit):
+
+#### HIGH
+
+- **HIGH-1** — `sales.confirm_order` ACL parity with helpdesk / project. The non-admin path narrowed the lookup domain with `["user_id", "=", uid]`, strictly narrower than Odoo's `ir.rule` for `sale.order`. A `sales_team.group_sale_manager` who could read a team member's quotation got `"Order not found"` instead of the actual permission outcome. Fix mirrors the helpdesk / project pattern: the clamp is removed, visibility defers to Odoo's `ir.rule`, and write-ACL denials surface verbatim (post-sanitisation) rather than being masked as 404s. Read-denied and non-existent return the identical `"Order not found"` message so attackers cannot enumerate order IDs they cannot read.
+
+#### MEDIUM
+
+- **MED-1** — `FieldInspector` cache is now keyed by `(model, session_key)` instead of `(model,)`. Odoo's `fields_get` respects per-user `groups=` field filtering, so the previous model-only key meant an admin's cached schema could be served to a portal user on a multi-tenant HTTP deployment, leaking field names + types. Stdio mode (no ContextVar) keeps the historical single-entry behaviour. `invalidate_cache(model)` now evicts all per-session entries for that model.
+- **MED-2** — The MCP completion handler in `core/discovery/completions.py` resolved admin status by picking the first entry from `gateway.auth_managers.values()`, which in HTTP multi-tenant produced a portal user seeing admin-accessible model names in their typeahead. The handler now reads the current session key via `get_current_session_key()` and looks up exactly that session's auth manager; missing / unknown / unbound keys all fail closed at `is_admin=False`.
+
+#### LOW
+
+- **LOW-1** — Optional extras now carry upper-bound version caps: `authlib>=1.6,<2`, `prometheus-client>=0.20,<1`, `structlog>=24.1,<27`, `opentelemetry-api>=1.25,<2`, `opentelemetry-sdk>=1.25,<2`, and `opentelemetry-instrumentation-httpx>=0.46b0,<1`. Runtime deps (`mcp`, `httpx`, `pydantic`, ...) stay open-ended since we depend on them for wire-protocol compatibility and capping them risks locking out fixes.
+- **LOW-2** — Sanitizer URL regex broadened to also match `dict://`, `tftp://`, `jar://`, and `chrome://` schemes (defence-in-depth against SSRF-bypass tricks an attacker might smuggle into an error message). URL-encoded / Unicode fullwidth variants remain a tracked follow-up.
+- **LOW-3** — `CHANGELOG.md` reorganised so the v0.3.0 pre-rc1 UAT findings are correctly listed under `[0.3.0]`, and `[Unreleased]` describes only in-progress work.
+- **LOW-4** — Reconciled comment drift in `core/plugin_middleware.py`: module docstring now correctly says seven lifecycle hooks (matching `plugins/sdk.py`), with `on_external_event` reserved for the v0.4.0 webhook stack.
+
+### v0.3.3 candidate follow-up batch (post-audit-#3, pre-UAT)
+
+Four additional items landed on top of the audit fixes, primarily driven by Odoo 17 UAT findings (1 MED operator-facing, 1 MED security parity, 2 LOW):
+
+- **Follow-up MED-3 (Odoo 17 UAT)** — custom-module detection for built-in plugins. Plugins that declare stock module/model names (e.g. helpdesk → `helpdesk`, `helpdesk.ticket`) previously refused to load on databases shipping a custom alternate (e.g. `odoo_website_helpdesk` exposing `ticket.helpdesk`). The registry now reads `model_access.yaml::plugin_overrides[<plugin>]` and OR-merges `accept_modules` / `accept_models` with the plugin's declared requirements. `PluginInfo.effective_model_name` exposes the resolved model name; the helpdesk plugin is migrated to read it via `_resolve_ticket_model()`. HR / sales / project plugins keep hard-coded model names (no regression) and can migrate in v0.4.0. See `docs/PLUGIN_AUTHORING.md` for the authoring pattern.
+- **Follow-up MED — model_registry per-session caching** — parity with `field_inspector` MED-1. `ir.model.search_read` is scoped by Odoo's per-user `ir.model.access` rules, so the discovered model map must be cached per session — an admin's discovery must not leak via typeahead to a portal user on a multi-tenant HTTP deployment. `ModelRegistry._sessions` replaces the single-instance `_models` dict; new `has_discovered()` / `invalidate()` methods expose per-session queries. `_models` survives as a property for backward compatibility with direct-access call sites.
+- **Follow-up LOW — elicitation RBAC pre-filter (audit #1 finding #13)** — `detect_missing_required_fields` now accepts an `is_admin` kwarg and skips required fields the caller can't write per `restrictions.check_field_write`. Eliciting an RBAC-blocked field guaranteed downstream rejection; the pre-filter avoids asking the user to fill in a field they have no power to set. `tools/crud.py::create_record` passes `is_admin` through.
+- **Follow-up LOW — cosmetics** — `plugins/sdk.py::_extract_required_majors` rewritten to inspect `SpecifierSet` operators directly instead of probing the major-version range [0..99] on every plugin load. The bounded probe remains as a fall-back for exotic specifier strings. Also fixed an arg-order drift in the `elicit_missing_fields` docstring example.
+
+### Post-UAT finding fixes
+
+Nine additional bugs surfaced through multi-version MCP-tool UAT swarms (Odoo 17, 18, 19 with 12 role-typed users on Odoo 19) and were all fixed in this release:
+
+- **UAT #1 — Post-login httpx client closed (MED reliability).** First `create_record` immediately after `login` was failing with `"Cannot send a request, as the client has been closed."` on Odoo 19; a subsequent `search_read` warmed the client up. Fixed by adding `_ensure_open_client()` guards in `client/jsonrpc.py` and `client/xmlrpc.py` — lazy-recreate a fresh `httpx.AsyncClient` if found in `is_closed=True` state. Resilient regardless of which event triggers the closure.
+- **UAT #2 — RBAC stale group cache (MED RBAC consistency).** Immediately after `login`, `execute_method` was rejecting admin users with `"requires base.group_system"` despite admin having that group; resolved after re-login. Fixed in `core/security/middleware.py::security_gate()` — now resolves the bound auth manager via `get_current_session_key()` ContextVar instead of `next(iter(auth_managers.values()))`.
+- **UAT #3 — `search_count` missing-model prefix inconsistency (LOW).** Odoo 17 returned `"Model not found: <model>"` (the LOW-1 prefix from v0.3.0) but Odoo 18+19 returned a generic `"Model or endpoint not found..."`. Broadened the prefix predicate in `tools/crud.py::search_count` to cover the two extra missing-model signals the newer Odoo versions emit.
+- **UAT #4 — Sanitizer `(Record:…, User: N)` repr leak (LOW).** `update_record` for a nonexistent id leaked an internal effective-uid via Odoo's record-repr fragment. New regex `_ODOO_RECORD_USER_RE` in `core/security/sanitizer.py` strips `\n(Record: model(ids,), User: <uid>)` → `(Record: model(ids,))`, keeping the model+ids context but removing the User repr.
+- **UAT #5a — `hr_employee` resolver returned admin's profile (MED).** `get_my_profile` for an unrelated user surfaced admin's hr.employee record. `hr.py::get_my_profile` was switched to use the contextvar-aware `_resolve_auth_manager(context)` helper. The same `next(iter(...))` anti-pattern as MED-2 (#2 above) lived here.
+- **UAT #5b — `helpdesk_manager` misclassified as portal (MED).** `is_portal_user()` was returning True for wholly-empty group sets, causing internal managers whose `_fetch_groups` failed silently to fall into the portal short-circuit. Tightened the helper — empty group sets and display-name groups with no portal-typed entries now return `False`.
+- **UAT #5c — `sales_user` fell back to admin's profile (MED).** A peer to UAT #5a in a different code path. `get_my_profile` now strictly validates that the returned `hr.employee.user_id[0]` matches the caller's uid; any mismatch becomes the friendly "no employee profile found" hint instead of leaking a foreign profile. Defense-in-depth — regardless of whether Odoo's `ir.rule` or session-binding glitched, the gateway will not surface a non-matching profile.
+- **UAT #5d — `portal_test` raw ACL leak on `get_my_profile` (MED, REGRESSION).** Tightening `is_portal_user()` (#5b) removed the friendly portal fallback for genuine empty-group portal users — they were getting raw Odoo ACL errors mentioning `hr.employee.public` and group XML IDs. Restored with two defenses inside `get_my_profile` ONLY (so `is_portal_user` itself stays strict for `list_models` tiering): (1) broader early-return for non-admin callers whose groups + group_xml_ids are both empty (or contain only portal/public XML IDs), (2) inner-exception handler that catches any `hr.employee.public` / `hr.employee` / `public employee` ACL error and converts to the friendly portal message.
+- **UAT #5e — SYSTEMIC Odoo ACL boilerplate leak (MED info disclosure).** The peer to #5d on `list_models` and other tools, but treated systemically. The sanitizer in `core/security/sanitizer.py` now strips Odoo's raw ACL-error boilerplate at a single point: technical model names `(model.technical.name)` in parentheses, the bulleted "This operation is allowed for the following groups:" block, and the "Contact your administrator..." tail are removed. Display name is retained for usefulness. Applied in both `sanitize()` and `sanitize_exception()`. Every MCP tool that goes through `gateway.sanitize_error()` (which is all of them) inherits the strip systemically — no per-tool wiring required.
+- **UAT #6 — `get_my_tickets` returned opaque "unexpected error" (LOW UX).** For users without an `hr.employee` link, the catch-all path returned the sanitised generic `"An unexpected error occurred"` — secure but unhelpful. The handler in `plugins/core/helpdesk.py::get_my_tickets` now detects this case and returns a friendlier `{"tickets": [], "count": 0, "error": "...", "hint": "..."}` shape pointing at the `search_read` workaround on the resolved ticket model.
+
+### Upgrade notes
+
+- **Removed private constant `_TICKET_MODEL`** in `plugins/core/helpdesk.py`. The model name is now resolved at call time via `_resolve_ticket_model()` so YAML `plugin_overrides` take effect. The constant was leading-underscore (private surface); any third-party fork that imported it must switch to reading `gateway.plugin_registry.get_plugin("helpdesk").effective_model_name` or call the plugin's own resolver.
+- **Stdio completion handler behaviour change** — pre-v0.3.3, the MCP completion handler picked the first auth manager out of `gateway.auth_managers.values()` and used its `is_admin` for completion filtering. In stdio mode this defaulted the admin user's typeahead to the full admin-accessible model list. v0.3.3 reads the current ContextVar session key; if it isn't bound, the handler fails closed at `is_admin=False` and returns the restricted-tier list. Stdio callers that exercise completion via the FastMCP middleware are unaffected (the middleware binds the ContextVar on tool entry); any caller invoking the completion handler outside the middleware needs to bind `_current_session_key` (or accept the restricted-tier default).
+- **Sanitizer ACL-boilerplate strip is English-anchored.** The three regexes anchor on the English Odoo ACL phrases. Non-English Odoo deployments (`lang=fr_FR`, `es_ES`, etc.) may bypass the strippers. Tracked for a v0.4.0 i18n UAT pass; mitigation is to anchor on the language-invariant `\([\w.]+\.\w+\)` model-name pattern.
+
 ## [0.3.2] - 2026-05-20
 
 ### Changed
@@ -40,12 +94,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No other changes — v0.3.1 is a metadata-only patch over v0.3.0.
 
-## [Unreleased] — pre-rc1 UAT findings fixed
+## [0.3.0] - 2026-05-20
 
-Multi-version UAT (Odoo 17 + 18 + 19) caught the following findings;
-all HIGH and MEDIUM items are fixed before `v0.3.0-rc1`.
+### Pre-rc1 UAT findings (Odoo 17 + 18 + 19)
 
-### HIGH
+Multi-version UAT caught the following findings; all HIGH and
+MEDIUM items were fixed before `v0.3.0-rc1`.
+
+#### HIGH
 
 - **UAT H1 (Odoo 18)** — Failed `login` now surfaces the still-active
   prior session's identity in the error payload as
@@ -62,7 +118,7 @@ all HIGH and MEDIUM items are fixed before `v0.3.0-rc1`.
   to Odoo's `ir.rule`; write-ACL denials surface verbatim
   (post-sanitisation) rather than masked as 404s.
 
-### MEDIUM
+#### MEDIUM
 
 - **UAT MED-1 (Odoo 17)** — `get_model_fields(field_filter=...)` now
   accepts a list, a comma-separated string, or a single substring
@@ -92,7 +148,7 @@ all HIGH and MEDIUM items are fixed before `v0.3.0-rc1`.
   Operators reading `list_models` no longer see the same model
   labelled `admin_only` AND get an "always blocked" error from CRUD.
 
-### LOW
+#### LOW
 
 - **UAT LOW-1 (Odoo 19)** — Portal users' `get_my_profile` no longer
   leaks the `hr.employee.public` model name or the missing-group XML
@@ -111,8 +167,6 @@ all HIGH and MEDIUM items are fixed before `v0.3.0-rc1`.
   users reading their own record. A new regression test
   (`tests/unit/security/test_field_masking.py`) pins the behaviour
   so a future change has to break a documented expectation.
-
-## [0.3.0] - 2026-05-20
 
 Major release — enterprise multi-user HTTP transport, OAuth 2.1 bearer auth, Plugin SDK 1.0, observability stack, and 8 new MCP-spec capabilities. **Strict backward-compat**: every v0.2.x stdio user upgrades with **zero config changes**.
 

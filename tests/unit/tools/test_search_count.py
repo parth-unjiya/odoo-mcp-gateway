@@ -124,3 +124,75 @@ class TestSearchCount:
         assert "error" in resp
         assert resp["error"].startswith("Model not found:")
         assert "website.helpdesk.ticket" in resp["error"]
+
+    async def test_missing_model_v18_v19_prefixed_for_endpoint_error(self) -> None:
+        """UAT v0.3.3 LOW (Odoo 18/19) — endpoint-not-found shape also prefixed.
+
+        Odoo 18/19 surface a different missing-model signal: the sanitiser
+        converts the Werkzeug 404 boilerplate into
+        ``"Model or endpoint not found. Verify the model name is correct
+        and the corresponding Odoo module is installed."``. Without this
+        regression, the caller saw the bare sanitiser line and could not
+        tell from the wire whether the gateway or Odoo failed. After fix,
+        the shape is identical to v17.
+        """
+        mock_client = make_mock_client()
+        # Simulate the raw Werkzeug 404 body — sanitiser will collapse
+        # it to the canonical "Model or endpoint not found." message.
+        mock_client.execute_kw = AsyncMock(
+            side_effect=Exception(
+                "404 Not Found: The requested URL was not found on the server."
+            ),
+        )
+        gateway = make_gateway(
+            mock_client=mock_client,
+            restriction_config=RestrictionConfig(),
+        )
+        from odoo_mcp_gateway.core.security.config_loader import ModelAccessConfig
+
+        gateway.restrictions._model_access = ModelAccessConfig(
+            default_policy="allow",
+        )
+
+        fn = _get_tool(gateway)
+        resp = await fn(model="non.existent.model")
+
+        assert "error" in resp
+        assert resp["error"].startswith("Model not found:")
+        assert "non.existent.model" in resp["error"]
+
+    async def test_missing_model_v18_v19_prefixed_for_odoo_endpoint(self) -> None:
+        """UAT v0.3.3 LOW — the ``OdooMissingError(HTTP_404)`` shape is
+        also normalised. This is the second-hand path: the jsonrpc layer
+        detected an HTML 404 response, raised ``OdooMissingError`` with
+        body ``"Odoo endpoint not found (HTTP 404)..."``, then
+        ``sanitize_error`` prefixed it as ``"Record not found: ..."``.
+        Without the v0.3.3 LOW broadening, the caller would see this
+        generic shape instead of ``"Model not found: <model>"``.
+        """
+        from odoo_mcp_gateway.client.exceptions import OdooMissingError
+
+        mock_client = make_mock_client()
+        mock_client.execute_kw = AsyncMock(
+            side_effect=OdooMissingError(
+                "Odoo endpoint not found (HTTP 404). This usually means "
+                "the model or method does not exist, or the URL path is wrong.",
+                code="HTTP_404",
+            ),
+        )
+        gateway = make_gateway(
+            mock_client=mock_client,
+            restriction_config=RestrictionConfig(),
+        )
+        from odoo_mcp_gateway.core.security.config_loader import ModelAccessConfig
+
+        gateway.restrictions._model_access = ModelAccessConfig(
+            default_policy="allow",
+        )
+
+        fn = _get_tool(gateway)
+        resp = await fn(model="ghost.model")
+
+        assert "error" in resp
+        assert resp["error"].startswith("Model not found:")
+        assert "ghost.model" in resp["error"]

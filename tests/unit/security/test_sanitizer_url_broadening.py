@@ -41,6 +41,25 @@ class TestUrlBroadening:
         out = self.s.sanitize("Webhook to https://internal.corp/secret failed")
         assert "https://" not in out
 
+    # v0.3.3 LOW-2: defence-in-depth — additional SSRF-bypass scheme
+    # families that an attacker may smuggle into an error message.
+
+    def test_dict_scheme_stripped(self) -> None:
+        out = self.s.sanitize("Probe to dict://internal:11211/stat failed")
+        assert "dict://" not in out
+
+    def test_tftp_scheme_stripped(self) -> None:
+        out = self.s.sanitize("Could not boot from tftp://10.0.0.1/image.bin")
+        assert "tftp://" not in out
+
+    def test_jar_scheme_stripped(self) -> None:
+        out = self.s.sanitize("Load via jar:file:/tmp/payload.jar!/Hax.class")
+        assert "jar:" not in out
+
+    def test_chrome_scheme_stripped(self) -> None:
+        out = self.s.sanitize("Bookmark chrome://settings/help referenced")
+        assert "chrome://" not in out
+
 
 class TestPathBroadening:
     def setup_method(self) -> None:

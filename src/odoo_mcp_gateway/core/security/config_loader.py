@@ -62,6 +62,58 @@ class RBACConfig(BaseModel):
     field_group_overrides: dict[str, Any] = {}
 
 
+class PluginOverride(BaseModel):
+    """Per-plugin override for module/model detection.
+
+    Operators add these in ``model_access.yaml`` under ``plugin_overrides``
+    when a stock plugin's ``required_odoo_modules`` / ``required_models``
+    must accept alternates from a custom Odoo module — e.g. the
+    ``odoo_website_helpdesk`` module ships ``ticket.helpdesk`` instead
+    of stock ``helpdesk.ticket`` and the helpdesk plugin would
+    otherwise see "module not installed" on a perfectly functional DB.
+
+    Both lists are OR-semantics: the plugin is satisfied if *any* of
+    its ``required_*`` entries OR *any* entry from the override list
+    is present. Leaving a list empty means "use only the plugin's
+    declared requirements".
+    """
+
+    accept_modules: list[str] = []
+    accept_models: list[str] = []
+
+    @field_validator("accept_models")
+    @classmethod
+    def validate_model_names(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for name in v:
+            clean = name.split("#")[0].strip() if "#" in name else name.strip()
+            if not clean:
+                continue
+            if not _MODEL_PATTERN.match(clean):
+                raise ValueError(
+                    f"Invalid model name '{clean}': must match [a-z][a-z0-9_.]*"
+                )
+            cleaned.append(clean)
+        return cleaned
+
+    @field_validator("accept_modules")
+    @classmethod
+    def validate_module_names(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for name in v:
+            clean = name.split("#")[0].strip() if "#" in name else name.strip()
+            if not clean:
+                continue
+            # Odoo module names use the same character set as Python
+            # identifiers — alnum + underscore, no dots.
+            if not _METHOD_PATTERN.match(clean):
+                raise ValueError(
+                    f"Invalid module name '{clean}': must match [a-zA-Z_][a-zA-Z0-9_]*"
+                )
+            cleaned.append(clean)
+        return cleaned
+
+
 class ModelAccessConfig(BaseModel):
     """Declarative model allow-list controlling which models the gateway exposes."""
 
@@ -70,6 +122,12 @@ class ModelAccessConfig(BaseModel):
     custom_models: dict[str, list[str]] = {}
     allowed_methods: dict[str, list[str]] = {}
     sensitive_fields: dict[str, list[str]] = {}
+    # v0.3.3 follow-up MED-3 (Odoo 17 UAT): operator-supplied
+    # per-plugin overrides for ``required_odoo_modules`` /
+    # ``required_models`` matching. Keys are plugin names
+    # (``helpdesk``, ``hr``, ...). Default empty — behaviour
+    # unchanged from v0.3.2 unless an operator opts in.
+    plugin_overrides: dict[str, PluginOverride] = {}
     # UAT M1 / MED-2 (Odoo 18 + 19): portal users see a much smaller
     # curated set via ``list_models``. When unset, the default is the
     # safest tight allow-list (``res.partner`` only). The values listed

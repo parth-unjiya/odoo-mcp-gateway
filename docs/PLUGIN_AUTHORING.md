@@ -197,8 +197,54 @@ Plugins should ship unit tests that:
 * Exercise the `plugin_sdk_version` field via
   `check_plugin_sdk_compat(name, spec)`.
 
+## Custom-module compatibility (v0.3.3 follow-up MED-3)
+
+When the stock Odoo module name a plugin declares doesn't match what's
+installed (e.g. the OCA `odoo_website_helpdesk` module ships
+`ticket.helpdesk` instead of stock `helpdesk.ticket`), operators can
+opt in to compatibility via `model_access.yaml`:
+
+```yaml
+plugin_overrides:
+  helpdesk:
+    accept_modules: ["helpdesk", "odoo_website_helpdesk"]
+    accept_models:  ["helpdesk.ticket", "ticket.helpdesk"]
+```
+
+OR semantics — the plugin is satisfied if **any** of (`required_*` ∪
+`accept_*`) is present. The first entry of `accept_models` wins as the
+effective model name; the registry exposes it as
+`PluginInfo.effective_model_name`.
+
+### Authoring pattern for plugin tools
+
+Plugins that may target multiple model names should:
+
+1. Declare a class-level default (e.g. `ticket_model = "helpdesk.ticket"`).
+2. Resolve the runtime name inside each tool via the registry:
+
+```python
+def _resolve_my_model() -> str:
+    registry = getattr(context, "plugin_registry", None)
+    if registry is None:
+        return self.my_model_default
+    info = registry.get_plugin(self.name)
+    if info is None:
+        return self.my_model_default
+    return getattr(info, "effective_model_name", None) or self.my_model_default
+```
+
+3. Pass the resolved value to every `execute_kw`, `check_model_access`,
+   `check_field_write`, and RBAC call in the tool body.
+
+The reference implementation is `plugins/core/helpdesk.py`. Other
+built-in plugins (`hr.py`, `project.py`, `sales.py`) still hard-code
+their model names — migration is opt-in and can land in v0.4.0
+without behaviour change for stock-module deployments.
+
 ## Reference
 
 * `src/odoo_mcp_gateway/plugins/sdk.py` — the Protocol + compat check.
 * `src/odoo_mcp_gateway/plugins/base.py` — convenience base class with no-op hooks.
 * `src/odoo_mcp_gateway/plugins/core/hr.py` — full reference implementation.
+* `src/odoo_mcp_gateway/plugins/core/helpdesk.py` — `plugin_overrides`-aware reference.

@@ -221,11 +221,27 @@ def build_completion_handler(
             arg_name = argument.name.lower()
             prefix = argument.value or ""
 
-            # Resolve admin status from the active session if
-            # available; default to non-admin (the safer assumption).
+            # v0.3.3 MED-2: resolve admin status from the SPECIFIC
+            # active session via ``get_current_session_key()`` rather
+            # than picking an arbitrary first entry from the gateway's
+            # ``auth_managers`` dict.  On a multi-tenant HTTP deployment
+            # the previous ``next(iter(...))`` could pluck an admin
+            # session and surface admin-only model names to a portal
+            # user.  When no session key is bound (stdio default or
+            # unauthenticated HTTP), we fail closed with
+            # ``is_admin=False``.
             is_admin = False
             if gateway.auth_managers:
-                mgr = next(iter(gateway.auth_managers.values()), None)
+                # Local import — avoids a circular dependency between
+                # the completion handler module and the server module.
+                from odoo_mcp_gateway.server import get_current_session_key
+
+                session_key = get_current_session_key()
+                mgr = (
+                    gateway.auth_managers.get(session_key)
+                    if session_key is not None
+                    else None
+                )
                 if mgr is not None and mgr.auth_result is not None:
                     is_admin = bool(mgr.auth_result.is_admin)
 

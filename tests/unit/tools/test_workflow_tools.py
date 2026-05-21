@@ -57,7 +57,7 @@ class TestGetCreateRequirements:
         gateway = make_gateway(mock_client=mock_client)
 
         # Populate field inspector cache
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "partner_id": FieldInfo(
@@ -97,7 +97,7 @@ class TestGetCreateRequirements:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "partner_id": FieldInfo(
@@ -128,7 +128,7 @@ class TestGetCreateRequirements:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "partner_id": FieldInfo(
@@ -152,7 +152,7 @@ class TestGetCreateRequirements:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(
@@ -209,7 +209,7 @@ class TestGetCreateRequirements:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "amount_total": FieldInfo(
@@ -238,7 +238,7 @@ class TestGetCreateRequirements:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "image": FieldInfo(
@@ -265,7 +265,7 @@ class TestGetCreateRequirements:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "type": FieldInfo(

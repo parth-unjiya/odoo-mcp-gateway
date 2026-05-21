@@ -194,7 +194,7 @@ async def test_list_models_resource_includes_custom() -> None:
 
 async def test_model_detail_returns_fields() -> None:
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "name": FieldInfo(
@@ -300,7 +300,7 @@ async def test_record_resource_without_auth() -> None:
 
 async def test_schema_resource_returns_field_schema() -> None:
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "name": FieldInfo(
@@ -334,7 +334,7 @@ async def test_schema_resource_returns_field_schema() -> None:
 
 async def test_schema_resource_marks_important_fields() -> None:
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "name": FieldInfo(
@@ -491,7 +491,7 @@ async def test_get_client_helper_raises_returns_none() -> None:
 async def test_model_detail_normalizes_name() -> None:
     """model_detail_resource normalizes 'RES.PARTNER ' to 'res.partner'."""
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "name": FieldInfo(
@@ -533,7 +533,7 @@ async def test_record_resource_normalizes_name() -> None:
 async def test_schema_resource_normalizes_name() -> None:
     """schema_resource normalizes 'RES.PARTNER ' to 'res.partner'."""
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "email": FieldInfo(
@@ -618,7 +618,7 @@ class _RecordRedactingRBAC:
 async def test_model_detail_rbac_hides_fields() -> None:
     """RBAC get_visible_fields excludes 'secret_field' from model detail."""
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "name": FieldInfo(
@@ -780,7 +780,7 @@ async def test_schema_resource_without_auth() -> None:
 async def test_schema_resource_with_selection_and_help() -> None:
     """schema_resource includes selection options and help text."""
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "type": FieldInfo(
@@ -811,7 +811,7 @@ async def test_schema_resource_with_selection_and_help() -> None:
 async def test_schema_resource_rbac_hides_fields() -> None:
     """schema_resource applies RBAC to hide sensitive fields."""
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "name": FieldInfo(
@@ -859,7 +859,7 @@ async def test_model_detail_invalid_model_name() -> None:
 async def test_model_detail_binary_fields_excluded() -> None:
     """model_detail_resource excludes binary fields from the response."""
     inspector = FieldInspector()
-    inspector._cache["res.partner"] = (
+    inspector._cache[("res.partner", None)] = (
         999999999.0,
         {
             "name": FieldInfo(

@@ -558,6 +558,16 @@ def create_server(settings: Settings) -> FastMCP:
 
     plugin_registry = PluginRegistry()
 
+    # Apply operator-supplied plugin overrides BEFORE discovery so any
+    # plugin found via entry_points picks up its custom-module
+    # alternates immediately. ``set_plugin_overrides`` is idempotent
+    # and tolerates unknown plugin names (they're held as pending).
+    try:
+        overrides = gateway.gateway_config.model_access.plugin_overrides
+        plugin_registry.set_plugin_overrides(overrides)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("Could not load plugin_overrides from config", exc_info=True)
+
     # Discover plugins via entry_points (works when package is installed)
     plugin_registry.discover()
     if not plugin_registry._plugins:

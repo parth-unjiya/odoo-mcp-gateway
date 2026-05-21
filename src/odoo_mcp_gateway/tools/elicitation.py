@@ -23,7 +23,7 @@ The integration pattern in a tool:
 
     missing = await detect_missing_required_fields(gateway, client, model, values)
     if missing:
-        filled = await elicit_missing_fields(ctx, model, missing, gateway)
+        filled = await elicit_missing_fields(ctx, gateway, client, model, missing)
         if filled is not None:
             values = {**values, **filled}
         else:
@@ -75,6 +75,7 @@ async def detect_missing_required_fields(
     model: str,
     values: dict[str, Any],
     field_info: dict[str, Any] | None = None,
+    is_admin: bool = False,
 ) -> list[str]:
     """Return the names of required fields the caller didn't supply.
 
@@ -88,6 +89,14 @@ async def detect_missing_required_fields(
     ``None`` — the existing empty-required check in
     ``_validate_writable_fields`` handles those. Elicitation is for
     fields the caller didn't mention at all.
+
+    Audit #1 finding #13 (v0.3.3): also excludes fields the caller
+    cannot WRITE per RBAC (``restrictions.check_field_write``). Asking
+    a non-admin to fill in a sensitive admin-only field is pointless
+    — the subsequent ``create_record`` would RBAC-reject it. The
+    *is_admin* parameter selects the user's privilege tier; pass
+    ``True`` for callers whose ``auth_result.is_admin`` flag is set.
+    Default ``False`` keeps the safer "as if non-admin" behaviour.
 
     *field_info* may be supplied by the caller to avoid a duplicate
     ``fields_get`` round-trip when the same schema is read again
@@ -113,6 +122,14 @@ async def detect_missing_required_fields(
         # Skip readonly / computed required fields — Odoo populates
         # them server-side, and the caller can't supply them anyway.
         if getattr(info, "readonly", False):
+            continue
+        # Skip fields the caller cannot write per RBAC. Eliciting
+        # them would lead to a guaranteed rejection downstream.
+        try:
+            field_block = gateway.restrictions.check_field_write(model, fname, is_admin)
+        except Exception:
+            field_block = None
+        if field_block:
             continue
         missing.append(fname)
     return missing

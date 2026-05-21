@@ -84,8 +84,32 @@ class JsonRpcClient(OdooClientBase):
             return {"session_id": sid}
         return {}
 
+    def _ensure_open_client(self) -> None:
+        """Re-instantiate ``self._client`` if it has been closed.
+
+        UAT v0.3.3 MED (Odoo 19): a closed-client scenario surfaced on
+        the first WRITE request after login while reads worked. The
+        symptom was ``"Cannot send a request, as the client has been
+        closed."`` from httpx — proving the underlying ``AsyncClient``
+        was already at ``is_closed=True`` by the time the write path
+        called ``self._client.post``. We were unable to pin down the
+        exact event sequence that closes it (no obvious ``aclose`` is
+        wired up in the gateway login path), but the safe remediation
+        is independent of root cause: lazily recreate the client at
+        the start of each RPC. The original client was owned by THIS
+        instance (``self._owns_client``) so recreation is allowed; if
+        an external httpx client was injected we leave it alone and
+        let the caller deal with the closed state explicitly.
+        """
+        if self._owns_client and self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=self._timeout,
+            )
+
     async def _rpc(self, path: str, params: dict[str, Any]) -> Any:
         """Send a JSON-RPC 2.0 request and return the ``result`` value."""
+        self._ensure_open_client()
         payload: dict[str, Any] = {
             "jsonrpc": "2.0",
             "id": self._next_id(),

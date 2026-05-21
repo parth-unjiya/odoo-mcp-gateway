@@ -578,25 +578,44 @@ class TestIDORProtection:
         ]
         assert len(user_id_entries) == 0
 
-    async def test_nonadmin_confirm_order_includes_user_id_in_domain(
+
+class TestConfirmOrderAclScope:
+    """v0.3.3 HIGH-1 — defer order visibility to Odoo's ir.rule.
+
+    The previous implementation added ``["user_id", "=", uid]`` to the
+    ``confirm_order`` search_read domain for non-admin callers, which is
+    strictly narrower than Odoo's row-level ACL.  A
+    ``sales_team.group_sale_manager`` who could read a team member's
+    quotation (because their group's ir.rule grants team-wide
+    visibility) but did not own it got "Order not found" — a misleading
+    404 for an operation the role was authorised to perform.  The fix
+    removes the clamp and trusts Odoo's ir.rule for read visibility;
+    subsequent ``action_confirm`` failures surface Odoo's own write-ACL
+    error.  Read-denied and non-existent both return the identical
+    "Order not found" message so attackers cannot enumerate IDs they
+    cannot read.
+    """
+
+    async def test_nonadmin_confirm_order_no_user_id_clamp(
         self, nonadmin_sales_tools, nonadmin_sales_context
     ):
-        """Non-admin confirm_order must include user_id filter in domain."""
+        """The search domain must not narrow below ``["id", "=", order_id]``."""
         _, client = nonadmin_sales_context
         client.execute_kw.side_effect = [
             [{"id": 1, "name": "S00001", "state": "draft"}],
             True,  # action_confirm
         ]
         await nonadmin_sales_tools["confirm_order"](order_id=1)
-        # First execute_kw call is the order verification search
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
-        assert ["user_id", "=", 42] in domain
+        # No ``user_id`` clamp — Odoo's ir.rule is now the sole gate.
+        assert all(not (isinstance(d, list) and d[0] == "user_id") for d in domain)
+        assert ["id", "=", 1] in domain
 
-    async def test_admin_confirm_order_does_not_include_user_id_in_domain(
+    async def test_admin_confirm_order_uses_id_only_domain(
         self, admin_sales_tools, admin_sales_context
     ):
-        """Admin confirm_order must NOT include user_id filter in domain."""
+        """Admin behaviour unchanged — domain is still id-only."""
         _, client = admin_sales_context
         client.execute_kw.side_effect = [
             [{"id": 1, "name": "S00001", "state": "draft"}],
@@ -606,7 +625,62 @@ class TestIDORProtection:
         call_args = client.execute_kw.call_args_list[0]
         domain = call_args[0][2][0]
         assert ["id", "=", 1] in domain
-        user_id_entries = [
-            d for d in domain if isinstance(d, list) and d[0] == "user_id"
+        assert all(not (isinstance(d, list) and d[0] == "user_id") for d in domain)
+
+    async def test_manager_can_confirm_order_owned_by_other_user(
+        self, nonadmin_sales_tools, nonadmin_sales_context
+    ):
+        """Sales manager (non-owner) can confirm a quotation they can read."""
+        _, client = nonadmin_sales_context
+        # The non-admin manager has read access to order 11 via ir.rule
+        # (Odoo returns the record from search_read) AND action_confirm
+        # succeeds.
+        client.execute_kw.side_effect = [
+            [{"id": 11, "name": "S00011", "state": "draft"}],
+            True,  # action_confirm succeeds
         ]
-        assert len(user_id_entries) == 0
+        result = await nonadmin_sales_tools["confirm_order"](order_id=11)
+        assert result.get("status") == "confirmed"
+        assert result.get("order_id") == 11
+        assert result.get("order_name") == "S00011"
+        assert result.get("previous_state") == "draft"
+
+    async def test_sales_user_denied_by_ir_rule_gets_not_found(
+        self, nonadmin_sales_tools, nonadmin_sales_context
+    ):
+        """A user whose ir.rule denies read sees the same 'Order not found'.
+
+        This ensures attackers cannot enumerate order IDs they cannot
+        read — denied-read and non-existent return the same message.
+        """
+        _, client = nonadmin_sales_context
+        # Odoo's ir.rule filters out the record, so search_read returns
+        # an empty list for IDs the user cannot read.
+        client.execute_kw.side_effect = [[]]
+        result = await nonadmin_sales_tools["confirm_order"](order_id=14)
+        assert result.get("error") == "Order not found"
+
+    async def test_nonexistent_order_id_gets_not_found(
+        self, nonadmin_sales_tools, nonadmin_sales_context
+    ):
+        """An ID that does not exist returns the same 'Order not found' message."""
+        _, client = nonadmin_sales_context
+        client.execute_kw.side_effect = [[]]
+        result = await nonadmin_sales_tools["confirm_order"](order_id=999999)
+        assert result.get("error") == "Order not found"
+
+    async def test_action_confirm_acl_error_surfaces_verbatim_not_404(
+        self, nonadmin_sales_tools, nonadmin_sales_context
+    ):
+        """If Odoo allows read but denies action_confirm, surface the error."""
+        _, client = nonadmin_sales_context
+        # Search succeeds (read ACL passes); action_confirm raises an
+        # ACL error.
+        client.execute_kw.side_effect = [
+            [{"id": 14, "name": "S00014", "state": "draft"}],
+            Exception("AccessError: You are not allowed to write"),
+        ]
+        result = await nonadmin_sales_tools["confirm_order"](order_id=14)
+        # Surface the Odoo-side error (post-sanitisation), not "not found".
+        assert result.get("error") is not None
+        assert "Order not found" not in result["error"]

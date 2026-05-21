@@ -767,14 +767,30 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
         except Exception as e:
             logger.exception("Unexpected error in search_count")
             sanitised = gateway.sanitize_error(e)
-            # UAT LOW-1 (Odoo 17): when Odoo bubbles up a bare-model-name
-            # error (e.g. ``"website.helpdesk.ticket"`` for a missing
-            # model), prefix it with ``Model not found:`` so the caller
-            # can act on the message. We only rewrite when the sanitised
-            # message is JUST the model name (no spaces, matches it
-            # case-insensitively) — anything richer is left alone.
-            if sanitised and sanitised.strip().lower() == model.lower():
-                sanitised = f"Model not found: {model}"
+            # UAT LOW-1 (Odoo 17/18/19): when Odoo signals a missing
+            # model, prefix the message with ``Model not found: <model>``
+            # so the caller sees a uniform shape regardless of Odoo
+            # version. Three known shapes are normalised:
+            #
+            #   * Odoo 17: bare model name (``"website.helpdesk.ticket"``)
+            #   * Odoo 18/19 (Werkzeug 404 → sanitiser):
+            #     ``"Model or endpoint not found. Verify..."``
+            #   * Odoo 18/19 (jsonrpc HTML 404 path through
+            #     ``OdooMissingError`` → ``sanitize_error``):
+            #     ``"Record not found: Odoo endpoint not found (HTTP 404)..."``
+            #
+            # Anything richer (validation errors, access errors, ...) is
+            # left alone — we only rewrite the missing-model signals.
+            if sanitised:
+                stripped = sanitised.strip()
+                model_lc = model.lower()
+                is_bare_model = stripped.lower() == model_lc
+                is_endpoint_not_found = (
+                    "model or endpoint not found" in stripped.lower()
+                    or "odoo endpoint not found" in stripped.lower()
+                )
+                if is_bare_model or is_endpoint_not_found:
+                    sanitised = f"Model not found: {model}"
             return {"error": sanitised}
 
     @server.tool()
@@ -892,6 +908,7 @@ def register_crud_tools(server: FastMCP, gateway: GatewayContext) -> None:
                         model,
                         values,
                         field_info=preloaded_field_info,
+                        is_admin=is_admin,
                     )
                     if missing:
                         filled = await elicit_missing_fields(

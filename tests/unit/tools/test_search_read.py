@@ -68,7 +68,7 @@ class TestSearchReadBasic:
         gateway = make_gateway(mock_client=mock_client)
 
         # Pre-populate field cache
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(
@@ -252,6 +252,36 @@ class TestSearchReadSecurity:
 
         assert "error" in resp
         assert "Access denied" in resp["error"]
+
+    async def test_acl_boilerplate_leak_sanitized(self) -> None:
+        """UAT v0.3.3 #5e (systemic): the raw Odoo ACL string must not
+        reach the response. Verifies search_read goes through the
+        sanitizer that strips technical names + group blocks + admin
+        tail."""
+        acl_message = (
+            "You are not allowed to access 'Public Employee' "
+            "(hr.employee.public) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Role / Member\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        mock_client = make_mock_client()
+        mock_client.execute_kw = AsyncMock(
+            side_effect=OdooAccessError(acl_message),
+        )
+        gateway = make_gateway(mock_client=mock_client)
+
+        fn = _get_tool(gateway)
+        resp = await fn(model="hr.employee", fields=["name"])
+
+        assert "error" in resp
+        err = resp["error"]
+        # All internals stripped
+        assert "hr.employee.public" not in err
+        assert "Role / Member" not in err
+        assert "Contact your administrator" not in err
+        # Friendly prefix retained
+        assert "Access denied" in err
 
     async def test_default_limit(self) -> None:
         mock_client = make_mock_client(execute_kw_return=[])

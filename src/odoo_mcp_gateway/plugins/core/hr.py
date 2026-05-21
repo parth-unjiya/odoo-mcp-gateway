@@ -605,6 +605,32 @@ class HRPlugin(OdooPlugin):
             if uid == 0:
                 return {"error": "Not authenticated"}
 
+            # Defensive helpers for the no-employee / portal short-circuits.
+            # Both branches return the same wire shape so callers can rely on
+            # a stable ``{"error","hint"}`` response regardless of how the
+            # gate triggered.
+            def _no_employee_response() -> dict[str, Any]:
+                # UAT LOW-2 (Odoo 19): friendlier wording for non-HR-linked
+                # users (sales_user / project_user / helpdesk_user etc.).
+                return {
+                    "error": "No employee profile found",
+                    "hint": (
+                        "Your user account is not linked to an "
+                        "hr.employee record. Ask HR to create one "
+                        "if you need attendance/leave features."
+                    ),
+                }
+
+            def _portal_response() -> dict[str, Any]:
+                # UAT LOW-1 (Odoo 19): friendly response for portal /
+                # no-internal-group callers. Stock strings only — no
+                # internal model names, no group identifiers, no
+                # Odoo internals.
+                return {
+                    "error": "Profile not available for portal users",
+                    "hint": "Portal users do not have an HR profile.",
+                }
+
             try:
                 is_admin, user_groups = get_auth_info(context)
 
@@ -614,17 +640,66 @@ class HRPlugin(OdooPlugin):
                 # ACL error. Surface a portal-friendly response BEFORE
                 # the read attempt — no internal models, no group
                 # names. ``is_portal_user`` is consulted from the
-                # auth_result (admin short-circuited above; both
-                # checks have to agree).
-                from odoo_mcp_gateway.core.security.rbac import is_portal_user
+                # auth_result for the CURRENT session (not the first
+                # manager in the dict — that pattern misroutes when
+                # contextvar binds to a different session under HTTP
+                # transport).
+                #
+                # UAT v0.3.3 MED (Odoo 19): previously this branch
+                # consulted ``next(iter(context.auth_managers.values()))``
+                # which returned the FIRST registered manager regardless
+                # of the active session — wrong for HTTP multi-session
+                # and dangerous because it could leak the wrong user's
+                # auth_result into the portal check. The contextvar-
+                # aware ``_resolve_auth_manager`` (via the helpers module)
+                # is the single source of truth.
+                from odoo_mcp_gateway.core.security.rbac import (
+                    _PORTAL_GROUP_XML_IDS,
+                    is_portal_user,
+                )
+                from odoo_mcp_gateway.plugins.core.helpers import (
+                    _resolve_auth_manager,
+                )
 
-                auth_mgr = next(iter(context.auth_managers.values()), None)
+                auth_mgr = _resolve_auth_manager(context)
                 ar = getattr(auth_mgr, "auth_result", None) if auth_mgr else None
                 if is_portal_user(ar):
-                    return {
-                        "error": "Profile not available for portal users",
-                        "hint": "Portal users do not have an HR profile.",
-                    }
+                    return _portal_response()
+
+                # UAT v0.3.3 LOW-1 (Odoo 19) follow-up — REGRESSION fix.
+                # ``is_portal_user`` was deliberately tightened so that an
+                # internal user whose ``_fetch_groups`` glitched no longer
+                # collapses to "portal" (which previously misclassified
+                # helpdesk_manager). The side effect: a real portal user
+                # whose group fetch ALSO returned empty (or whose XML IDs
+                # weren't populated) now falls through to the hr.employee
+                # read and trips Odoo's raw ACL error, leaking
+                # ``hr.employee.public`` and group XML IDs.
+                #
+                # Defence-in-depth here: BEFORE the read, if BOTH
+                # ``groups`` and ``group_xml_ids`` give us no proof of
+                # internal-group membership, treat the caller as portal
+                # for THIS tool only. Non-admins with empty group sets are
+                # never internal users in practice — internal users always
+                # have at least ``base.group_user`` (or its display name).
+                # This DOES NOT broaden ``is_portal_user`` itself — the
+                # ``list_models`` tier classification still uses the
+                # strict definition.
+                if ar is not None and not getattr(ar, "is_admin", False):
+                    ar_groups = list(getattr(ar, "groups", []) or [])
+                    ar_xml_ids = list(getattr(ar, "group_xml_ids", []) or [])
+                    if not ar_groups and not ar_xml_ids:
+                        # No group info at all → cannot prove internal.
+                        return _portal_response()
+                    # Both lists contain ONLY portal/public XML IDs (or are
+                    # empty) → still portal. We re-do the check here so
+                    # callers with e.g. ``group_xml_ids=["base.group_portal"]``
+                    # plus empty ``groups`` are handled symmetrically; the
+                    # primary ``is_portal_user`` already covered them, but
+                    # this branch is the conservative belt-and-braces.
+                    combined = set(ar_groups) | set(ar_xml_ids)
+                    if combined and combined.issubset(_PORTAL_GROUP_XML_IDS):
+                        return _portal_response()
 
                 restriction_msg = context.restrictions.check_model_access(
                     "hr.employee", "read", is_admin
@@ -632,38 +707,69 @@ class HRPlugin(OdooPlugin):
                 if isinstance(restriction_msg, str):
                     return {"error": restriction_msg}
 
-                records = await client.execute_kw(
-                    "hr.employee",
-                    "search_read",
-                    [[["user_id", "=", uid]]],
-                    {
-                        "fields": [
-                            "name",
-                            "job_id",
-                            "department_id",
-                            "work_email",
-                            "work_phone",
-                            "parent_id",
-                            "coach_id",
-                            "work_location_id",
-                        ],
-                        "limit": 1,
-                    },
-                )
+                # UAT v0.3.3 LOW-2 (Odoo 19) follow-up — STRICT user_id
+                # validation. Include ``user_id`` in the projection so we
+                # can defensively confirm the returned row actually belongs
+                # to the caller. Without this validation a stale row, an
+                # ir.rule fallthrough, or a custom override could silently
+                # surface another user's record (specifically, admin's id=1
+                # leaked through to sales_user on Odoo 19 — finding #5c).
+                try:
+                    records = await client.execute_kw(
+                        "hr.employee",
+                        "search_read",
+                        [[["user_id", "=", uid]]],
+                        {
+                            "fields": [
+                                "name",
+                                "job_id",
+                                "department_id",
+                                "work_email",
+                                "work_phone",
+                                "parent_id",
+                                "coach_id",
+                                "work_location_id",
+                                "user_id",
+                            ],
+                            "limit": 1,
+                        },
+                    )
+                except Exception as read_exc:
+                    # UAT v0.3.3 LOW-1 (Odoo 19) follow-up — defence-in-depth
+                    # exception handler. If Odoo raises a raw ACL error that
+                    # mentions internal model names (``hr.employee.public``
+                    # or ``hr.employee``), convert it to the portal-friendly
+                    # message so the leaked internals never reach the wire.
+                    err_msg = str(read_exc).lower()
+                    if (
+                        "hr.employee.public" in err_msg
+                        or "hr.employee" in err_msg
+                        or "public employee" in err_msg
+                    ):
+                        return _portal_response()
+                    raise
+
                 if not records:
-                    # UAT LOW-2 (Odoo 19): friendlier wording for
-                    # non-HR-linked users (sales_user / project_user /
-                    # helpdesk_user etc.). The wire shape stays
-                    # ``{"error", ..., "hint", ...}`` for parity with
-                    # other gateway error responses.
-                    return {
-                        "error": "No employee profile found",
-                        "hint": (
-                            "Your user account is not linked to an "
-                            "hr.employee record. Ask HR to create one "
-                            "if you need attendance/leave features."
-                        ),
-                    }
+                    return _no_employee_response()
+
+                # Defensive: validate ``user_id`` matches the caller. Odoo
+                # returns ``user_id`` as either an ``[id, name]`` 2-tuple
+                # (m2o display form) or ``False`` (unlinked). Reject rows
+                # whose user_id does not match the caller's uid — finding
+                # #5c reproduced this exact race (an unlinked-user call
+                # silently surfaced admin's hr.employee.id=1).
+                rec = records[0]
+                rec_user_id = rec.get("user_id")
+                rec_uid: int | None = None
+                if isinstance(rec_user_id, (list, tuple)) and rec_user_id:
+                    if isinstance(rec_user_id[0], int):
+                        rec_uid = rec_user_id[0]
+                elif isinstance(rec_user_id, int):
+                    rec_uid = rec_user_id
+                if rec_uid != uid:
+                    # Mismatch → treat as "no employee" rather than leak
+                    # another user's profile.
+                    return _no_employee_response()
 
                 filtered = context.rbac.filter_response_fields(
                     records, "hr.employee", user_groups, is_admin
@@ -673,5 +779,12 @@ class HRPlugin(OdooPlugin):
 
                 return {"profile": records[0]}
             except Exception as e:
+                # Defence-in-depth: the inner try/except already converts
+                # the common ACL leak path, but a different code path (e.g.
+                # filter_response_fields raising) could still surface the
+                # model name. Apply the same conversion here.
+                err_msg = str(e).lower()
+                if "hr.employee.public" in err_msg or "public employee" in err_msg:
+                    return _portal_response()
                 model_err = format_model_error("hr.employee", e)
                 return {"error": model_err or context.sanitize_error(e)}

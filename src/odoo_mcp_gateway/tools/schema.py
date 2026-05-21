@@ -85,8 +85,11 @@ def register_schema_tools(server: FastMCP, gateway: GatewayContext) -> None:
             if offset < 0:
                 return {"error": "offset must be >= 0"}
 
-            # Trigger discovery if needed
-            if not gateway._models_discovered:
+            # Trigger discovery for THIS session if needed. The
+            # registry caches model maps per (session_key) so an
+            # admin's discovery is not served to a portal user — see
+            # ``ModelRegistry.has_discovered`` for the v0.3.3 follow-up.
+            if not gateway.model_registry.has_discovered():
                 await gateway.model_registry.discover(client)
                 gateway._models_discovered = True
 

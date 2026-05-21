@@ -278,16 +278,23 @@ class TestListModels:
 
         The previous code branched only ``is_admin`` vs ``not is_admin``,
         which collapsed portal users into the same tier as internal demo
-        users. The new ``is_portal_user(...)`` helper detects empty /
-        portal-only group sets and clamps ``list_models`` accordingly.
+        users. The new ``is_portal_user(...)`` helper detects explicit
+        portal/public group membership and clamps ``list_models``
+        accordingly.
+
+        v0.3.3 Finding #5: ``is_portal_user`` was tightened so that an
+        EMPTY group set is treated as "unknown / non-portal" (fail-closed
+        safer default). Portal classification now requires an explicit
+        portal/public group XML ID, so this test uses
+        ``base.group_portal`` rather than empty groups.
         """
         from tests.unit.tools.conftest import make_auth_result
 
         gateway = make_gateway(
             auth_result=make_auth_result(
                 is_admin=False,
-                groups=[],
-                group_xml_ids=[],
+                groups=["Portal"],
+                group_xml_ids=["base.group_portal"],
             ),
         )
         gateway.model_registry._models = {
@@ -498,6 +505,120 @@ class TestListModels:
 
 
 # ------------------------------------------------------------------
+# Systemic ACL leak (UAT v0.3.3 #5e)
+# ------------------------------------------------------------------
+
+
+class TestListModelsAclLeakSanitization:
+    """End-to-end: when discovery raises Odoo's stock ACL error, the
+    response must NOT leak internal model technical names, group
+    XML IDs, or the ``Contact your administrator`` tail.
+
+    This is the regression guard for finding #5e (portal_test calling
+    list_models on Odoo 19 leaked ``ir.model`` + ``Access Rights``).
+    """
+
+    async def test_acl_leak_from_ir_model_discovery_is_sanitized(self) -> None:
+        from odoo_mcp_gateway.client.exceptions import OdooAccessError
+        from tests.unit.tools.conftest import make_auth_result
+
+        # Portal user. Discovery on ir.model fires and Odoo raises the
+        # canonical ACL error — the gateway must convert it to a clean
+        # message with no internals.
+        acl_message = (
+            "You are not allowed to access 'Models' (ir.model) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Administration / Access Rights\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        mock_client = make_mock_client()
+        mock_client.execute_kw.side_effect = OdooAccessError(acl_message)
+
+        gateway = make_gateway(
+            mock_client=mock_client,
+            auth_result=make_auth_result(
+                is_admin=False,
+                groups=["Portal"],
+                group_xml_ids=["base.group_portal"],
+            ),
+        )
+        # Force discovery to run (not pre-discovered).
+        gateway._models_discovered = False
+
+        tools = _get_tools(gateway)
+        resp = await tools["list_models"]()
+
+        assert "error" in resp
+        err = resp["error"]
+        # Technical model name stripped
+        assert "ir.model" not in err
+        assert "(ir.model)" not in err
+        # Group block stripped
+        assert "Access Rights" not in err
+        assert "Administration" not in err
+        assert "allowed for the following groups" not in err
+        # Administrator tail stripped
+        assert "Contact your administrator" not in err
+        # Friendly prefix retained
+        assert "Access denied" in err
+
+    async def test_acl_leak_with_internal_user_also_sanitized(self) -> None:
+        """Even internal users must not see the raw ACL boilerplate
+        when an ACL error fires (e.g. a tool that crosses into an
+        admin-only model). The sanitizer is caller-agnostic."""
+        from odoo_mcp_gateway.client.exceptions import OdooAccessError
+
+        acl_message = (
+            "You are not allowed to access 'Public Employee' "
+            "(hr.employee.public) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Role / Member\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        mock_client = make_mock_client()
+        mock_client.execute_kw.side_effect = OdooAccessError(acl_message)
+        gateway = make_gateway(mock_client=mock_client)
+        gateway._models_discovered = False
+
+        tools = _get_tools(gateway)
+        resp = await tools["list_models"]()
+
+        assert "error" in resp
+        err = resp["error"]
+        assert "hr.employee.public" not in err
+        assert "Role / Member" not in err
+        assert "Contact your administrator" not in err
+
+
+class TestGetModelFieldsAclLeakSanitization:
+    """``get_model_fields`` hits ``fields_get`` directly; if the model
+    is ACL-protected for the caller, Odoo raises the same boilerplate
+    we want to scrub at the sanitizer layer."""
+
+    async def test_acl_leak_from_fields_get_is_sanitized(self) -> None:
+        from odoo_mcp_gateway.client.exceptions import OdooAccessError
+
+        acl_message = (
+            "You are not allowed to access 'Sales Order' (sale.order) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Sales / Administrator\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        mock_client = make_mock_client()
+        mock_client.execute_kw.side_effect = OdooAccessError(acl_message)
+        gateway = make_gateway(mock_client=mock_client)
+
+        tools = _get_tools(gateway)
+        resp = await tools["get_model_fields"](model="sale.order")
+
+        assert "error" in resp
+        err = resp["error"]
+        assert "sale.order" not in err
+        assert "Sales / Administrator" not in err
+        assert "Contact your administrator" not in err
+
+
+# ------------------------------------------------------------------
 # get_model_fields
 # ------------------------------------------------------------------
 
@@ -508,7 +629,7 @@ class TestGetModelFields:
         gateway = make_gateway(mock_client=mock_client)
 
         # Mock the field inspector
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(
@@ -537,7 +658,7 @@ class TestGetModelFields:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(name="name", field_type="char", string="Name"),
@@ -585,7 +706,7 @@ class TestGetModelFields:
             user_groups=["base.group_user"],
         )
 
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(name="name", field_type="char", string="Name"),
@@ -616,7 +737,7 @@ class TestGetModelFields:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(
@@ -647,7 +768,7 @@ class TestGetModelFields:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
 
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(name="name", field_type="char", string="Order Ref"),
@@ -682,7 +803,7 @@ class TestGetModelFieldsFilterListShapes:
     def _gateway_with_partner_fields() -> Any:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(name="name", field_type="char", string="Name"),
@@ -787,7 +908,7 @@ class TestGetModelFieldsFilterListShapes:
             mock_client=mock_client,
             user_groups=["base.group_user"],
         )
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(name="name", field_type="char", string="Name"),

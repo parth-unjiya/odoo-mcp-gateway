@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -152,6 +153,60 @@ class TestGetMyTickets:
         client.execute_kw.side_effect = Exception("Connection refused")
         result = await tools["get_my_tickets"]()
         assert result["error"] == "Connection refused"
+
+    async def test_opaque_unexpected_error_replaced_with_hint(
+        self, mock_context
+    ) -> None:
+        """UAT v0.3.3 LOW (Odoo 19): when the plugin wrapper fails for
+        an unspecified reason that the sanitiser collapses to the
+        bare ``"An unexpected error occurred"`` string, the response
+        is replaced with a friendlier shape — empty tickets list +
+        a hint pointing at the supported ``search_read`` workaround.
+        Previously, helpdesk_user (no hr.employee record) calling
+        get_my_tickets saw the opaque message and had no way to
+        diagnose / work around it.
+        """
+        from unittest.mock import MagicMock
+
+        from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin
+
+        ctx, client = mock_context
+        # Override sanitize_error to return the opaque sanitiser fallback —
+        # the contract the plugin must softening-handle. Whatever the
+        # underlying exception, the gateway-level sanitiser may strip
+        # everything and emit this string for security reasons.
+        ctx.sanitize_error = lambda _exc: "An unexpected error occurred"
+
+        # Trigger an arbitrary exception in the search_read path.
+        client.execute_kw.side_effect = RuntimeError("opaque internal failure")
+
+        # Re-register the plugin on the patched context to capture the
+        # updated tool definitions (the ``tools`` fixture closed over the
+        # original sanitize_error).
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HelpdeskPlugin().register(server, ctx)
+
+        result = await captured["get_my_tickets"]()
+        # MUST NOT surface the opaque message verbatim.
+        assert result.get("error") != "An unexpected error occurred"
+        # Wire shape: empty list + hint guiding caller to search_read.
+        assert result.get("tickets") == []
+        assert result.get("count") == 0
+        assert "hint" in result
+        assert "search_read" in result["hint"]
+        # Hint references the resolved ticket model so the caller
+        # knows exactly which model to query directly.
+        assert "helpdesk.ticket" in result["hint"]
 
 
 # ── create_ticket tests ──────────────────────────────────────────
@@ -494,3 +549,145 @@ class TestUpdateTicketStageAclScope:
         # Surface the Odoo-side error (post-sanitisation), not "not found".
         assert result.get("error") is not None
         assert "Ticket not found" not in result["error"]
+
+
+# ── v0.3.3 follow-up MED-3: effective_model_name resolution ────────────
+
+
+def _make_context_with_registry(effective_model: str) -> tuple[Any, AsyncMock]:
+    """Build a helpdesk context whose plugin_registry reports a specific
+    ``effective_model_name`` so the tool reads the configured custom
+    module name (e.g. ``ticket.helpdesk``) instead of the stock default.
+    """
+    ctx = MagicMock()
+    client = AsyncMock()
+    auth_mgr = MagicMock()
+    auth_mgr.get_active_client.return_value = client
+    auth_mgr.auth_result = MagicMock(uid=42, is_admin=False, groups=["base.group_user"])
+    ctx.auth_managers = {"session": auth_mgr}
+    ctx.sanitize_error = lambda exc: str(exc)
+    ctx.rate_limiter = None
+    ctx.audit_logger = None
+    ctx.rbac.check_tool_access.return_value = None
+    ctx.restrictions.check_field_write.return_value = None
+
+    # Plugin registry returns an info object whose effective_model_name
+    # matches the configured override target.
+    info = MagicMock()
+    info.effective_model_name = effective_model
+    info.missing_modules = []
+    ctx.plugin_registry.get_plugin.return_value = info
+    return ctx, client
+
+
+class TestEffectiveModelName:
+    """Plugin tools must respect ``PluginInfo.effective_model_name``
+    so an operator-configured custom module name (e.g.
+    ``ticket.helpdesk``) is used in place of the stock default."""
+
+    async def test_get_my_tickets_uses_effective_model(self) -> None:
+        ctx, client = _make_context_with_registry("ticket.helpdesk")
+        from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HelpdeskPlugin().register(server, ctx)
+
+        client.execute_kw.return_value = []
+        await captured["get_my_tickets"]()
+
+        # The first positional arg to execute_kw is the model name.
+        call = client.execute_kw.call_args
+        assert call[0][0] == "ticket.helpdesk"
+
+    async def test_create_ticket_uses_effective_model(self) -> None:
+        ctx, client = _make_context_with_registry("ticket.helpdesk")
+        from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HelpdeskPlugin().register(server, ctx)
+
+        ctx.rbac.sanitize_write_values.side_effect = (
+            lambda values, model, user_groups, is_admin: dict(values)
+        )
+        client.execute_kw.return_value = 11
+        await captured["create_ticket"](name="t")
+
+        call = client.execute_kw.call_args
+        assert call[0][0] == "ticket.helpdesk"
+
+    async def test_update_ticket_stage_uses_effective_model(self) -> None:
+        ctx, client = _make_context_with_registry("ticket.helpdesk")
+        from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HelpdeskPlugin().register(server, ctx)
+
+        ctx.rbac.sanitize_write_values.side_effect = (
+            lambda values, model, user_groups, is_admin: dict(values)
+        )
+        client.execute_kw.side_effect = [
+            [{"id": 5, "name": "x", "stage_id": [1, "New"]}],
+            True,
+        ]
+        await captured["update_ticket_stage"](ticket_id=5, stage_id=3)
+        # Both search_read and write use the configured custom model name.
+        for call in client.execute_kw.call_args_list:
+            assert call[0][0] == "ticket.helpdesk"
+
+    async def test_no_override_falls_back_to_stock_model(self) -> None:
+        """A non-string ``effective_model_name`` (or its absence) falls
+        back to the plugin's class default ``helpdesk.ticket``."""
+        ctx, client = _make_context_with_registry("helpdesk.ticket")
+        # Now scramble: registry reports None / wrong-type, plugin must
+        # fall back to the static ``ticket_model`` default.
+        info = ctx.plugin_registry.get_plugin.return_value
+        info.effective_model_name = None
+        info.missing_modules = []
+
+        from odoo_mcp_gateway.plugins.core.helpdesk import HelpdeskPlugin
+
+        server = MagicMock()
+        captured: dict = {}
+
+        def fake_tool():
+            def decorator(func):
+                captured[func.__name__] = func
+                return func
+
+            return decorator
+
+        server.tool = fake_tool
+        HelpdeskPlugin().register(server, ctx)
+        client.execute_kw.return_value = []
+        await captured["get_my_tickets"]()
+        assert client.execute_kw.call_args[0][0] == "helpdesk.ticket"

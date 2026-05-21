@@ -366,7 +366,7 @@ class TestDryRunRunsValidation:
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
         # Seed the field cache with a readonly/computed field
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(
@@ -406,7 +406,7 @@ class TestDryRunRunsValidation:
         gateway = make_gateway(mock_client=mock_client)
         # Use res.partner — it's in the default test full_crud — and
         # seed the field cache marking ``name`` as required.
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(
@@ -438,7 +438,7 @@ class TestDryRunRunsValidation:
 
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "name": FieldInfo(
@@ -481,7 +481,7 @@ class TestDryRunDateAndSelectionValidation:
 
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "date_order": FieldInfo(
@@ -510,7 +510,7 @@ class TestDryRunDateAndSelectionValidation:
 
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "birthdate": FieldInfo(
@@ -537,7 +537,7 @@ class TestDryRunDateAndSelectionValidation:
 
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "lang": FieldInfo(
@@ -564,7 +564,7 @@ class TestDryRunDateAndSelectionValidation:
 
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
-        gateway.field_inspector._cache["sale.order"] = (
+        gateway.field_inspector._cache[("sale.order", None)] = (
             999999999.0,
             {
                 "date_order": FieldInfo(
@@ -591,7 +591,7 @@ class TestDryRunDateAndSelectionValidation:
 
         mock_client = make_mock_client()
         gateway = make_gateway(mock_client=mock_client)
-        gateway.field_inspector._cache["res.partner"] = (
+        gateway.field_inspector._cache[("res.partner", None)] = (
             999999999.0,
             {
                 "color": FieldInfo(

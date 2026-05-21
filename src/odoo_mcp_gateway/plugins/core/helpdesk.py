@@ -17,8 +17,13 @@ from odoo_mcp_gateway.plugins.core.helpers import (
     get_uid,
 )
 
-# The model name varies between Odoo installations.
-_TICKET_MODEL = "helpdesk.ticket"
+# The model name varies between Odoo installations.  Stock Odoo
+# ships ``helpdesk.ticket``; the popular ``odoo_website_helpdesk``
+# module on the OCA replaces it with ``ticket.helpdesk``.  The
+# plugin's ``ticket_model`` attribute is the static default;
+# operators flip it via ``model_access.yaml::plugin_overrides`` and
+# the registry exposes the resolved value through
+# ``PluginInfo.effective_model_name``.
 
 _VALID_PRIORITIES = frozenset({"0", "1", "2", "3"})
 
@@ -29,9 +34,31 @@ _STATE_FILTER_RE = re.compile(r"^[\w \-]{1,64}$")
 
 
 class HelpdeskPlugin(OdooPlugin):
-    """Provides MCP tools for helpdesk: tickets, teams, priorities."""
+    """Provides MCP tools for helpdesk: tickets, teams, priorities.
+
+    v0.3.3 follow-up MED-3: installations running a custom helpdesk
+    module (e.g. ``odoo_website_helpdesk`` which ships
+    ``ticket.helpdesk`` instead of stock ``helpdesk.ticket``) can opt
+    into compatibility by configuring
+    ``model_access.yaml::plugin_overrides.helpdesk``::
+
+        plugin_overrides:
+          helpdesk:
+            accept_modules: ["helpdesk", "odoo_website_helpdesk"]
+            accept_models:  ["helpdesk.ticket", "ticket.helpdesk"]
+
+    The registry merges these into ``required_*`` with OR semantics
+    and exposes the resolved model name as ``PluginInfo.effective_model_name``.
+    The tools below read that value through ``_resolve_ticket_model()``
+    so a single deployment can stay on whichever module Odoo actually
+    has installed without forking the plugin.
+    """
 
     plugin_sdk_version = ">=1.0,<2.0"
+
+    # Default model name — overridden at runtime when an operator
+    # configures ``plugin_overrides.helpdesk.accept_models``.
+    ticket_model: str = "helpdesk.ticket"
 
     @property
     def name(self) -> str:
@@ -53,6 +80,32 @@ class HelpdeskPlugin(OdooPlugin):
         """Register helpdesk tools on the MCP server."""
         _plugin_name = self.name
         _required_models = self.required_models
+
+        def _resolve_ticket_model() -> str:
+            """Resolve the effective ticket model for THIS deployment.
+
+            Order of preference: the registry's ``effective_model_name``
+            (set by ``set_plugin_overrides`` from YAML) -> the plugin's
+            class-level ``ticket_model`` default. The helper is called
+            lazily inside each tool so an operator changing the YAML
+            and re-loading the gateway picks up the new value without
+            re-registration. Defensive against MagicMock-flavoured test
+            contexts: any non-string ``effective_model_name`` falls
+            back to the static default.
+            """
+            registry = getattr(context, "plugin_registry", None)
+            if registry is None:
+                return self.ticket_model
+            try:
+                info = registry.get_plugin(_plugin_name)
+            except Exception:
+                return self.ticket_model
+            if info is None:
+                return self.ticket_model
+            effective = getattr(info, "effective_model_name", None)
+            if isinstance(effective, str) and effective:
+                return effective
+            return self.ticket_model
 
         @server.tool()
         async def get_my_tickets(
@@ -89,11 +142,12 @@ class HelpdeskPlugin(OdooPlugin):
             if uid == 0:
                 return {"error": "Not authenticated"}
 
+            ticket_model = _resolve_ticket_model()
             try:
                 is_admin, user_groups = get_auth_info(context)
 
                 restriction_msg = context.restrictions.check_model_access(
-                    _TICKET_MODEL, "read", is_admin
+                    ticket_model, "read", is_admin
                 )
                 if isinstance(restriction_msg, str):
                     return {"error": restriction_msg}
@@ -105,7 +159,7 @@ class HelpdeskPlugin(OdooPlugin):
                     domain.append(["priority", "=", priority])
 
                 records = await client.execute_kw(
-                    _TICKET_MODEL,
+                    ticket_model,
                     "search_read",
                     [domain],
                     {
@@ -124,7 +178,7 @@ class HelpdeskPlugin(OdooPlugin):
                 )
 
                 filtered = context.rbac.filter_response_fields(
-                    records, _TICKET_MODEL, user_groups, is_admin
+                    records, ticket_model, user_groups, is_admin
                 )
                 if isinstance(filtered, list):
                     records = filtered
@@ -132,9 +186,37 @@ class HelpdeskPlugin(OdooPlugin):
                 return {"tickets": records, "count": len(records)}
             except Exception as e:
                 model_err = format_model_error(
-                    _TICKET_MODEL, e, alternate_models=["ticket.helpdesk"]
+                    ticket_model, e, alternate_models=["ticket.helpdesk"]
                 )
-                return {"error": model_err or context.sanitize_error(e)}
+                if model_err:
+                    return {"error": model_err}
+                sanitised = context.sanitize_error(e)
+                # UAT v0.3.3 LOW (Odoo 19): an unhandled non-model-error
+                # path used to return the bare sanitiser fallback
+                # ``"An unexpected error occurred"``. Direct
+                # ``search_read`` on ``helpdesk.ticket`` works for the
+                # same user, so the plugin-side wrapping is the surface
+                # to soften. Replace the opaque message with a
+                # friendly hint pointing the caller at the supported
+                # workaround (direct ``search_read``) and surface an
+                # empty list so the wire shape stays consistent.
+                if sanitised == "An unexpected error occurred":
+                    return {
+                        "tickets": [],
+                        "count": 0,
+                        "error": (
+                            "Could not resolve helpdesk tickets for your "
+                            "user. The plugin wrapper failed for an "
+                            "unspecified reason."
+                        ),
+                        "hint": (
+                            "Try calling search_read on "
+                            f"{ticket_model!r} directly with domain "
+                            "[['user_id', '=', <your_uid>]] — this "
+                            "bypasses the plugin wrapper."
+                        ),
+                    }
+                return {"error": sanitised}
 
         @server.tool()
         async def create_ticket(
@@ -170,11 +252,12 @@ class HelpdeskPlugin(OdooPlugin):
             if uid == 0:
                 return {"error": "Not authenticated"}
 
+            ticket_model = _resolve_ticket_model()
             try:
                 is_admin, user_groups = get_auth_info(context)
 
                 restriction_msg = context.restrictions.check_model_access(
-                    _TICKET_MODEL, "create", is_admin
+                    ticket_model, "create", is_admin
                 )
                 if isinstance(restriction_msg, str):
                     return {"error": restriction_msg}
@@ -194,13 +277,13 @@ class HelpdeskPlugin(OdooPlugin):
                 # Check blocked write fields
                 for field_name in values:
                     field_msg = context.restrictions.check_field_write(
-                        _TICKET_MODEL, field_name, is_admin
+                        ticket_model, field_name, is_admin
                     )
                     if field_msg:
                         return {"error": field_msg}
 
                 sanitized = context.rbac.sanitize_write_values(
-                    values, _TICKET_MODEL, user_groups, is_admin
+                    values, ticket_model, user_groups, is_admin
                 )
                 if isinstance(sanitized, dict):
                     # If RBAC stripped user_id, refuse to create an unassigned
@@ -216,7 +299,7 @@ class HelpdeskPlugin(OdooPlugin):
                     values = sanitized
 
                 ticket_id = await client.execute_kw(
-                    _TICKET_MODEL,
+                    ticket_model,
                     "create",
                     [values],
                 )
@@ -228,7 +311,7 @@ class HelpdeskPlugin(OdooPlugin):
                 }
             except Exception as e:
                 model_err = format_model_error(
-                    _TICKET_MODEL, e, alternate_models=["ticket.helpdesk"]
+                    ticket_model, e, alternate_models=["ticket.helpdesk"]
                 )
                 return {"error": model_err or context.sanitize_error(e)}
 
@@ -264,11 +347,12 @@ class HelpdeskPlugin(OdooPlugin):
             if uid == 0:
                 return {"error": "Not authenticated"}
 
+            ticket_model = _resolve_ticket_model()
             try:
                 is_admin, user_groups = get_auth_info(context)
 
                 restriction_msg = context.restrictions.check_model_access(
-                    _TICKET_MODEL, "write", is_admin
+                    ticket_model, "write", is_admin
                 )
                 if isinstance(restriction_msg, str):
                     return {"error": restriction_msg}
@@ -289,7 +373,7 @@ class HelpdeskPlugin(OdooPlugin):
                 # masked as a not-found.
                 domain: list[Any] = [["id", "=", ticket_id]]
                 tickets = await client.execute_kw(
-                    _TICKET_MODEL,
+                    ticket_model,
                     "search_read",
                     [domain],
                     {"fields": ["id", "name", "stage_id"], "limit": 1},
@@ -305,19 +389,19 @@ class HelpdeskPlugin(OdooPlugin):
                 # Check blocked write fields
                 for field_name in values:
                     field_msg = context.restrictions.check_field_write(
-                        _TICKET_MODEL, field_name, is_admin
+                        ticket_model, field_name, is_admin
                     )
                     if field_msg:
                         return {"error": field_msg}
 
                 sanitized = context.rbac.sanitize_write_values(
-                    values, _TICKET_MODEL, user_groups, is_admin
+                    values, ticket_model, user_groups, is_admin
                 )
                 if isinstance(sanitized, dict):
                     values = sanitized
 
                 await client.execute_kw(
-                    _TICKET_MODEL,
+                    ticket_model,
                     "write",
                     [[ticket_id], values],
                 )
@@ -330,6 +414,6 @@ class HelpdeskPlugin(OdooPlugin):
                 }
             except Exception as e:
                 model_err = format_model_error(
-                    _TICKET_MODEL, e, alternate_models=["ticket.helpdesk"]
+                    ticket_model, e, alternate_models=["ticket.helpdesk"]
                 )
                 return {"error": model_err or context.sanitize_error(e)}

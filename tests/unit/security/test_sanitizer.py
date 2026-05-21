@@ -349,3 +349,259 @@ class TestWerkzeug404Mapping:
         sanitizer = ErrorSanitizer()
         result = sanitizer.sanitize("Some other error message")
         assert "Model or endpoint" not in result
+
+
+class TestOdooRecordUserRepr:
+    """v0.3.3 LOW: strip the internal ``(Record: model(ids,), User: uid)``
+    repr that Odoo appends to MissingError / AccessError messages.
+    The ``User:`` portion leaks an EFFECTIVE-uid (may not match the
+    caller's session uid) so it must be removed; the ``Record:`` portion
+    is retained for debuggability.
+    """
+
+    def test_strips_user_uid_keeps_record(self, sanitizer: ErrorSanitizer) -> None:
+        raw = (
+            "Record does not exist or has been deleted.\n"
+            "(Record: res.partner(999999999,), User: 6)"
+        )
+        result = sanitizer.sanitize(raw)
+        assert "User: 6" not in result
+        assert "User:" not in result
+        # Model + ids retained
+        assert "res.partner" in result
+        assert "999999999" in result
+
+    def test_strips_user_uid_from_missing_error(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        # When wrapped in the canonical Odoo MissingError prefix, the
+        # mapped friendly message must also be free of the User leak.
+        raw = (
+            "odoo.exceptions.MissingError: Record does not exist or has "
+            "been deleted.\n(Record: res.partner(42,), User: 6)"
+        )
+        result = sanitizer.sanitize(raw)
+        assert "User: 6" not in result
+        # Either the mapped "Record not found" prefix is kept, or the
+        # remainder retains the Record context — but never the User leak.
+        assert "User:" not in result
+
+    def test_strips_multiple_user_uid_fragments(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        raw = (
+            "Multi-error report:\n(Record: sale.order(1,), User: 6) "
+            "and\n(Record: res.partner(2,), User: 7)"
+        )
+        result = sanitizer.sanitize(raw)
+        assert "User: 6" not in result
+        assert "User: 7" not in result
+        # Both record contexts retained
+        assert "sale.order" in result
+        assert "res.partner" in result
+
+    def test_non_record_message_unchanged_in_substance(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        # Ensure a benign message that does NOT contain the pattern
+        # passes through without unintended structural damage.
+        raw = "Plain validation message: field 'name' is required"
+        result = sanitizer.sanitize(raw)
+        assert "field 'name' is required" in result
+
+    def test_pattern_strips_even_without_leading_newline(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        raw = "Some error (Record: res.partner(5,), User: 3) trailing"
+        result = sanitizer.sanitize(raw)
+        assert "User: 3" not in result
+        assert "User:" not in result
+
+
+# ── Odoo ACL boilerplate stripping (UAT v0.3.3 #5e systemic) ─────
+
+
+class TestOdooAclBoilerplate:
+    """Strip technical model names, allowed-group lists, and the
+    ``Contact your administrator`` tail from Odoo's stock ACL-denial
+    error message. These three sub-patterns are the systemic source
+    of the #5d / #5e leaks observed in get_my_profile + list_models.
+    """
+
+    def test_strips_hr_employee_public_acl_leak(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        # The exact wire string observed for portal_test calling
+        # mcp__testodoo19mcp__get_my_profile on Odoo 19.
+        raw = (
+            "You are not allowed to access 'Public Employee' "
+            "(hr.employee.public) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Role / Member\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize(raw)
+        # Technical model name gone
+        assert "hr.employee.public" not in result
+        assert "(hr.employee.public)" not in result
+        # Group block gone
+        assert "Role / Member" not in result
+        assert "allowed for the following groups" not in result
+        # Administrator tail gone
+        assert "Contact your administrator" not in result
+        # Display name + leading "You are not allowed" kept (Option A)
+        assert "Public Employee" in result
+        assert "You are not allowed" in result
+
+    def test_strips_ir_model_acl_leak(self, sanitizer: ErrorSanitizer) -> None:
+        # The #5e finding: portal_test on list_models (which hits
+        # ir.model under the hood) leaked ``ir.model`` + ``Access Rights``.
+        raw = (
+            "You are not allowed to access 'Models' (ir.model) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Administration / Access Rights\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize(raw)
+        assert "ir.model" not in result
+        assert "(ir.model)" not in result
+        assert "Access Rights" not in result
+        assert "Administration / Access Rights" not in result
+        assert "Contact your administrator" not in result
+        assert "Models" in result  # display name retained
+
+    def test_strips_multi_group_acl_block(self, sanitizer: ErrorSanitizer) -> None:
+        raw = (
+            "You are not allowed to access 'Sales Order' (sale.order) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Sales / Administrator\n"
+            "\t- Sales / User: Own Documents Only\n"
+            "\t- Sales / User: All Documents\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize(raw)
+        assert "sale.order" not in result
+        assert "Sales / Administrator" not in result
+        assert "Own Documents Only" not in result
+        assert "All Documents" not in result
+        assert "Contact your administrator" not in result
+
+    def test_strips_acl_block_embedded_in_longer_error(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        # The ACL boilerplate might be preceded by other text (e.g. a
+        # method-call context line). The strippers must still fire.
+        raw = (
+            "Method execute_kw failed:\n"
+            "You are not allowed to access 'Helpdesk Ticket' "
+            "(helpdesk.ticket) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Helpdesk / User\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize(raw)
+        assert "helpdesk.ticket" not in result
+        assert "Helpdesk / User" not in result
+        assert "Contact your administrator" not in result
+        # Preserved context: the original "Method execute_kw failed"
+        # framing is still there for debuggability.
+        assert "Method execute_kw failed" in result
+        # Display name preserved
+        assert "Helpdesk Ticket" in result
+
+    def test_non_acl_error_passes_through_unchanged(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        # Negative: a generic non-ACL error should not be mangled.
+        result = sanitizer.sanitize("Record not found")
+        assert result == "Record not found"
+
+    def test_partial_acl_only_groups_block(self, sanitizer: ErrorSanitizer) -> None:
+        # An error that contains only the groups-block fragment (no
+        # leading "You are not allowed" line, no admin-contact tail)
+        # still gets the group block stripped.
+        raw = (
+            "Some prefix\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Role / Member\n"
+            "trailing text"
+        )
+        result = sanitizer.sanitize(raw)
+        assert "allowed for the following groups" not in result
+        assert "Role / Member" not in result
+        assert "Some prefix" in result
+        assert "trailing text" in result
+
+    def test_partial_acl_only_admin_contact_tail(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        raw = (
+            "Operation failed.\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize(raw)
+        assert "Contact your administrator" not in result
+        assert "Operation failed" in result
+
+    def test_acl_with_friendly_exception_prefix(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        # When the message also carries the ``odoo.exceptions.AccessError``
+        # prefix (the legacy XMLRPC-style fault-string), the friendly
+        # mapping branch must still produce a clean output — the
+        # remainder must have already been stripped of the technical
+        # name + groups + admin tail.
+        raw = (
+            "odoo.exceptions.AccessError: "
+            "You are not allowed to access 'Public Employee' "
+            "(hr.employee.public) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Role / Member\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize(raw)
+        assert "hr.employee.public" not in result
+        assert "Role / Member" not in result
+        assert "Contact your administrator" not in result
+        assert "Access denied" in result
+
+    def test_acl_via_sanitize_exception(self, sanitizer: ErrorSanitizer) -> None:
+        # Exercise the OdooAccessError-from-JSON-RPC path: the exception
+        # carries the raw ACL string in its message but its type name is
+        # NOT embedded — the dispatch goes through sanitize_exception.
+        access_error_cls = type("AccessError", (Exception,), {})
+        access_error_cls.__module__ = "odoo.exceptions"
+        access_error_cls.__qualname__ = "AccessError"
+        exc = access_error_cls(
+            "You are not allowed to access 'Public Employee' "
+            "(hr.employee.public) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t- Role / Member\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize_exception(exc)
+        # Display name retained
+        assert "Public Employee" in result
+        # All internals stripped
+        assert "hr.employee.public" not in result
+        assert "Role / Member" not in result
+        assert "Contact your administrator" not in result
+        # Friendly prefix retained
+        assert "Access denied" in result
+
+    def test_acl_groups_block_with_asterisk_bullets(
+        self, sanitizer: ErrorSanitizer
+    ) -> None:
+        # Some translations / customisations render bullets as ``*``
+        # instead of ``-``. Match either.
+        raw = (
+            "You are not allowed to access 'Stock Move' (stock.move) records.\n\n"
+            "This operation is allowed for the following groups:\n"
+            "\t* Inventory / Manager\n\n"
+            "Contact your administrator to request access if necessary."
+        )
+        result = sanitizer.sanitize(raw)
+        assert "stock.move" not in result
+        assert "Inventory / Manager" not in result
+        assert "Contact your administrator" not in result
+        assert "Stock Move" in result

@@ -32,8 +32,13 @@ def _get_tool(gateway: Any, tool_name: str) -> Any:
 
 
 def _prime_fields(gateway: Any, model: str, fields: dict[str, FieldInfo]) -> None:
-    """Seed the field-inspector cache so we don't go through execute_kw."""
-    gateway.field_inspector._cache[model] = (999_999_999.0, fields)
+    """Seed the field-inspector cache so we don't go through execute_kw.
+
+    v0.3.3 MED-1: cache is now keyed by (model, session_key) where
+    ``session_key`` is read from the gateway's ContextVar.  Tests run
+    without binding the ContextVar so the session_key is ``None``.
+    """
+    gateway.field_inspector._cache[(model, None)] = (999_999_999.0, fields)
 
 
 # ── P2-5: id field is immutable ────────────────────────────────────

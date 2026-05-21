@@ -126,6 +126,102 @@ class TestDetectMissingRequiredFields:
         assert missing == []
 
 
+# ── v0.3.3 follow-up: RBAC pre-filter (audit #1 finding #13) ───────
+
+
+class TestDetectMissingRequiredFieldsRbacFilter:
+    """Eliciting a required field the caller can't write per RBAC
+    leads to a guaranteed downstream rejection.  ``detect_missing_*``
+    must pre-filter those out so capable clients aren't asked to fill
+    in fields they have no power to set.
+    """
+
+    def _gw_with_rbac_blocked(self, blocked_field: str) -> Any:
+        """Build a gateway whose ``check_field_write`` blocks
+        ``blocked_field`` for non-admins (admin path is unrestricted).
+        """
+        gw = _gateway()
+
+        def _check(model: str, field: str, is_admin: bool) -> str | None:
+            if is_admin:
+                return None
+            if field == blocked_field:
+                return f"Field '{field}' requires admin access"
+            return None
+
+        gw.restrictions.check_field_write = _check  # type: ignore[method-assign]
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_nonadmin_excludes_rbac_blocked_required_field(self) -> None:
+        gw = self._gw_with_rbac_blocked("sensitive_field")
+        client = MagicMock()
+        gw.field_inspector.get_fields = AsyncMock(
+            return_value={
+                "name": _field(required=True),
+                "sensitive_field": _field(required=True),
+            }
+        )
+        missing = await detect_missing_required_fields(
+            gw, client, "sale.order", values={}, is_admin=False
+        )
+        # ``sensitive_field`` is RBAC-blocked for non-admin → omitted.
+        assert "sensitive_field" not in missing
+        assert "name" in missing
+
+    @pytest.mark.asyncio
+    async def test_admin_sees_all_required_fields(self) -> None:
+        """Admin users bypass the RBAC pre-filter (check_field_write
+        returns None for is_admin=True)."""
+        gw = self._gw_with_rbac_blocked("sensitive_field")
+        client = MagicMock()
+        gw.field_inspector.get_fields = AsyncMock(
+            return_value={
+                "name": _field(required=True),
+                "sensitive_field": _field(required=True),
+            }
+        )
+        missing = await detect_missing_required_fields(
+            gw, client, "sale.order", values={}, is_admin=True
+        )
+        assert sorted(missing) == ["name", "sensitive_field"]
+
+    @pytest.mark.asyncio
+    async def test_writable_required_field_included_for_nonadmin(self) -> None:
+        """A required field that is NOT RBAC-blocked must still be in
+        the returned list for non-admins."""
+        gw = self._gw_with_rbac_blocked("sensitive_field")
+        client = MagicMock()
+        gw.field_inspector.get_fields = AsyncMock(
+            return_value={
+                "writable_field": _field(required=True),
+            }
+        )
+        missing = await detect_missing_required_fields(
+            gw, client, "sale.order", values={}, is_admin=False
+        )
+        assert missing == ["writable_field"]
+
+    @pytest.mark.asyncio
+    async def test_check_field_write_exception_does_not_propagate(self) -> None:
+        """If the RBAC check itself raises, treat the field as
+        writable (don't break elicitation on a transient failure)."""
+        gw = _gateway()
+
+        def _boom(model: str, field: str, is_admin: bool) -> str | None:
+            raise RuntimeError("RBAC subsystem unreachable")
+
+        gw.restrictions.check_field_write = _boom  # type: ignore[method-assign]
+        client = MagicMock()
+        gw.field_inspector.get_fields = AsyncMock(
+            return_value={"name": _field(required=True)}
+        )
+        missing = await detect_missing_required_fields(
+            gw, client, "sale.order", values={}, is_admin=False
+        )
+        assert missing == ["name"]
+
+
 class TestBuildElicitSchema:
     def test_selection_field_gets_enum(self) -> None:
         gw = _gateway()

@@ -365,11 +365,35 @@ class TestIsPortalUser:
         ar = self._result(is_admin=True, group_xml_ids=["base.group_system"])
         assert is_portal_user(ar) is False
 
-    def test_empty_group_set_is_portal(self) -> None:
+    def test_empty_group_set_is_not_portal(self) -> None:
+        """UAT v0.3.3 MED-5: a wholly-empty group set CANNOT be proven
+        to be portal. Earlier behaviour returned True here, but that
+        misclassified internal users whose ``_fetch_groups`` failed
+        silently during login (network blip, transient ACL hiccup)
+        and surfaced an inaccurate ``Profile not available for portal
+        users`` error. We now fail OPEN to the internal-user path —
+        the standard no-employee / ACL response is the right answer.
+        """
         from odoo_mcp_gateway.core.security.rbac import is_portal_user
 
         ar = self._result(group_xml_ids=[])
-        assert is_portal_user(ar) is True
+        assert is_portal_user(ar) is False
+
+    def test_empty_xml_ids_with_internal_display_groups_is_not_portal(self) -> None:
+        """UAT v0.3.3 MED-5 regression: a user whose XML IDs failed to
+        resolve but whose display-name groups list IS populated with
+        internal groups (e.g. helpdesk_manager) must NOT be classified
+        as portal. Previously, the display-name fallback returned True
+        when none of the names matched the portal set — the opposite
+        of the safe behaviour.
+        """
+        from odoo_mcp_gateway.core.security.rbac import is_portal_user
+
+        ar = self._result(
+            group_xml_ids=[],
+            groups=["Helpdesk / Manager", "User types / Internal User"],
+        )
+        assert is_portal_user(ar) is False
 
     def test_portal_only_group_is_portal(self) -> None:
         from odoo_mcp_gateway.core.security.rbac import is_portal_user

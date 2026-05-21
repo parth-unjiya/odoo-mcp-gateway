@@ -301,3 +301,136 @@ async def test_important_fields_no_duplicates() -> None:
     fields = await inspector.get_fields(_make_client(), "sale.order")
     important = inspector.get_important_fields("sale.order", fields)
     assert len(important) == len(set(important))
+
+
+# ------------------------------------------------------------------
+# v0.3.3 MED-1 — per-session cache scoping
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cache_scoped_per_session_key() -> None:
+    """Two distinct session_keys for the same model produce 2 cache entries.
+
+    Odoo's ``fields_get`` respects per-user ``groups=`` field
+    filtering, so an admin's cached schema must not be served to a
+    portal user.  This test pins the ContextVar to two different
+    session keys and verifies ``execute_kw`` fires twice (cache miss
+    for each).
+    """
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    client = _make_client()
+    inspector = FieldInspector()
+
+    # First call as session "admin"
+    set_current_session_key("admin")
+    try:
+        await inspector.get_fields(client, "res.users")
+        # Second call as session "portal" — same model, different user.
+        set_current_session_key("portal")
+        await inspector.get_fields(client, "res.users")
+    finally:
+        set_current_session_key(None)
+
+    # Two distinct cache entries -> two ``execute_kw`` calls.
+    assert client.execute_kw.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_within_same_session_key() -> None:
+    """Two calls in the same session reuse a single cache entry."""
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    client = _make_client()
+    inspector = FieldInspector()
+
+    set_current_session_key("session-A")
+    try:
+        await inspector.get_fields(client, "res.users")
+        await inspector.get_fields(client, "res.users")
+    finally:
+        set_current_session_key(None)
+
+    assert client.execute_kw.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_ttl_per_session_independent() -> None:
+    """TTL expiration is per-(model, session) entry, not global."""
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    client = _make_client()
+    inspector = FieldInspector(cache_ttl=10)
+
+    set_current_session_key("session-A")
+    try:
+        await inspector.get_fields(client, "sale.order")
+    finally:
+        set_current_session_key(None)
+
+    # Session A's entry is fresh.  Advance time past TTL.  Session B's
+    # never-populated entry should not be considered "expired" — it
+    # was simply never populated.  This is what we expect from the
+    # current implementation, so the call just creates session B's
+    # first entry, independent of session A.
+    original_monotonic = time.monotonic
+    with patch(
+        "odoo_mcp_gateway.core.discovery.field_inspector.time.monotonic",
+        side_effect=lambda: original_monotonic() + 20,
+    ):
+        set_current_session_key("session-B")
+        try:
+            await inspector.get_fields(client, "sale.order")
+        finally:
+            set_current_session_key(None)
+
+    # Both sessions made a real call (session A initially, session B
+    # because it had no entry yet).
+    assert client.execute_kw.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_empty_session_key_shares_single_entry() -> None:
+    """Stdio mode (no ContextVar) keeps the historical single entry."""
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    client = _make_client()
+    inspector = FieldInspector()
+
+    # No session key bound — matches stdio / single-user behaviour.
+    set_current_session_key(None)
+    await inspector.get_fields(client, "sale.order")
+    await inspector.get_fields(client, "sale.order")
+    assert client.execute_kw.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_invalidate_cache_evicts_all_sessions_for_model() -> None:
+    """Invalidation by model evicts every per-session entry for that model."""
+    from odoo_mcp_gateway.server import set_current_session_key
+
+    client = _make_client()
+    inspector = FieldInspector()
+
+    set_current_session_key("admin")
+    try:
+        await inspector.get_fields(client, "res.users")
+        set_current_session_key("portal")
+        await inspector.get_fields(client, "res.users")
+    finally:
+        set_current_session_key(None)
+    assert client.execute_kw.call_count == 2
+
+    # Invalidate the model — both per-session entries should be evicted.
+    inspector.invalidate_cache("res.users")
+
+    set_current_session_key("admin")
+    try:
+        await inspector.get_fields(client, "res.users")
+        set_current_session_key("portal")
+        await inspector.get_fields(client, "res.users")
+    finally:
+        set_current_session_key(None)
+    # Two more ``execute_kw`` calls because both entries were evicted.
+    assert client.execute_kw.call_count == 4

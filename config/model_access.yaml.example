@@ -168,6 +168,30 @@ allowed_methods:
     - action_assign_to_me
     - action_open_task_form
 
+# ── Plugin overrides ─────────────────────────────────────────────
+# Operator escape hatch for installations where the stock Odoo module
+# name differs from a plugin's declared ``required_odoo_modules`` /
+# ``required_models``. The registry OR-merges these alternates with the
+# plugin's declared requirements — the plugin is considered satisfied
+# if ANY of (declared ∪ accepted) modules is installed.
+#
+# Common scenario: ``odoo_website_helpdesk`` ships the helpdesk feature
+# under a different model name (``ticket.helpdesk`` instead of stock
+# ``helpdesk.ticket``). Without the override the helpdesk plugin would
+# refuse to start with "helpdesk module not installed" even on a fully
+# functional helpdesk DB. Example:
+#
+#   plugin_overrides:
+#     helpdesk:
+#       accept_modules: ["helpdesk", "odoo_website_helpdesk"]
+#       accept_models:  ["helpdesk.ticket", "ticket.helpdesk"]
+#
+# The first entry of ``accept_models`` is preferred as the effective
+# model name; plugin tools issue ``execute_kw`` against it directly.
+# Leaving this section empty (default) preserves v0.3.2 behaviour
+# unchanged.
+plugin_overrides: {}
+
 # ── Sensitive fields ─────────────────────────────────────────────
 # Fields that are always stripped from responses for non-admin users.
 # For finer-grained control, see rbac.yaml → sensitive_fields.

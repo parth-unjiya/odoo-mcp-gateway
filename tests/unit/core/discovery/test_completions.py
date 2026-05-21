@@ -193,3 +193,145 @@ class TestHandlerRobustness:
         handler = build_completion_handler(gw)
         result = await handler(_prompt_ref(), _arg("model", "sale"), None)
         assert result is None
+
+
+class TestSessionScopedAdminResolution:
+    """v0.3.3 MED-2 — admin status comes from the active session, not arbitrary."""
+
+    @pytest.mark.asyncio
+    async def test_admin_session_sees_admin_filtered_models(self) -> None:
+        """ContextVar pinned to an admin session -> is_admin=True path."""
+        from unittest.mock import MagicMock
+
+        from odoo_mcp_gateway.server import set_current_session_key
+
+        gw = _make_gateway()
+
+        # Register two auth managers: an admin and a portal user.
+        admin_mgr = MagicMock()
+        admin_mgr.auth_result = MagicMock(is_admin=True)
+        portal_mgr = MagicMock()
+        portal_mgr.auth_result = MagicMock(is_admin=False)
+        gw.auth_managers = {
+            "admin_session": admin_mgr,
+            "portal_session": portal_mgr,
+        }
+
+        handler = build_completion_handler(gw)
+
+        # Pin the ContextVar to the admin session.
+        set_current_session_key("admin_session")
+        try:
+            result = await handler(_prompt_ref(), _arg("model", "sale"), None)
+        finally:
+            set_current_session_key(None)
+
+        assert result is not None
+        # Models the admin can read still come through.
+        assert "sale.order" in result.values
+
+    @pytest.mark.asyncio
+    async def test_portal_session_falls_back_to_non_admin(self) -> None:
+        """ContextVar pinned to a portal session -> is_admin=False."""
+        from unittest.mock import MagicMock
+
+        from odoo_mcp_gateway.server import set_current_session_key
+
+        gw = _make_gateway()
+        admin_mgr = MagicMock()
+        admin_mgr.auth_result = MagicMock(is_admin=True)
+        portal_mgr = MagicMock()
+        portal_mgr.auth_result = MagicMock(is_admin=False)
+        gw.auth_managers = {
+            "admin_session": admin_mgr,
+            "portal_session": portal_mgr,
+        }
+
+        # Inject a spy into restrictions.check_model_access to verify
+        # the is_admin flag passed in.  We replace it with a lambda
+        # that records each call.
+        seen_is_admin: list[bool] = []
+        original_check = gw.restrictions.check_model_access
+
+        def spy(model: str, op: str, is_admin: bool):  # noqa: ANN001
+            seen_is_admin.append(is_admin)
+            return original_check(model, op, is_admin)
+
+        gw.restrictions.check_model_access = spy  # type: ignore[assignment]
+
+        handler = build_completion_handler(gw)
+
+        set_current_session_key("portal_session")
+        try:
+            await handler(_prompt_ref(), _arg("model", "sale"), None)
+        finally:
+            set_current_session_key(None)
+
+        # The handler must have called the restriction check with the
+        # portal session's is_admin=False, never the admin's True.
+        assert seen_is_admin, "restriction check was never invoked"
+        assert all(flag is False for flag in seen_is_admin)
+
+    @pytest.mark.asyncio
+    async def test_no_session_key_defaults_to_non_admin(self) -> None:
+        """No ContextVar bound -> fail closed at is_admin=False."""
+        from unittest.mock import MagicMock
+
+        from odoo_mcp_gateway.server import set_current_session_key
+
+        gw = _make_gateway()
+        # Even if an admin session exists in the dict, no ContextVar
+        # means we must not pick it.
+        admin_mgr = MagicMock()
+        admin_mgr.auth_result = MagicMock(is_admin=True)
+        gw.auth_managers = {"admin_session": admin_mgr}
+
+        seen_is_admin: list[bool] = []
+        original_check = gw.restrictions.check_model_access
+
+        def spy(model: str, op: str, is_admin: bool):  # noqa: ANN001
+            seen_is_admin.append(is_admin)
+            return original_check(model, op, is_admin)
+
+        gw.restrictions.check_model_access = spy  # type: ignore[assignment]
+
+        handler = build_completion_handler(gw)
+        # Clear any leftover ContextVar.
+        set_current_session_key(None)
+        await handler(_prompt_ref(), _arg("model", "sale"), None)
+
+        assert seen_is_admin
+        # Fail-closed: no session key -> is_admin must be False even
+        # though the dict's only entry is an admin.
+        assert all(flag is False for flag in seen_is_admin)
+
+    @pytest.mark.asyncio
+    async def test_unknown_session_key_defaults_to_non_admin(self) -> None:
+        """ContextVar bound to an unknown session -> fail closed."""
+        from unittest.mock import MagicMock
+
+        from odoo_mcp_gateway.server import set_current_session_key
+
+        gw = _make_gateway()
+        admin_mgr = MagicMock()
+        admin_mgr.auth_result = MagicMock(is_admin=True)
+        gw.auth_managers = {"admin_session": admin_mgr}
+
+        seen_is_admin: list[bool] = []
+        original_check = gw.restrictions.check_model_access
+
+        def spy(model: str, op: str, is_admin: bool):  # noqa: ANN001
+            seen_is_admin.append(is_admin)
+            return original_check(model, op, is_admin)
+
+        gw.restrictions.check_model_access = spy  # type: ignore[assignment]
+
+        handler = build_completion_handler(gw)
+        set_current_session_key("nonexistent_session")
+        try:
+            await handler(_prompt_ref(), _arg("model", "sale"), None)
+        finally:
+            set_current_session_key(None)
+
+        assert seen_is_admin
+        assert all(flag is False for flag in seen_is_admin)

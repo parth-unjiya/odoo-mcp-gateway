@@ -216,7 +216,7 @@ class TestSearchReadFieldRename:
         mock_client = make_mock_client(execute_kw_return=[])
         gateway = _v19_gateway(mock_client=mock_client)
         # Pre-populate cache so smart-field selection returns ``tax_id``
-        gateway.field_inspector._cache["sale.order.line"] = (
+        gateway.field_inspector._cache[("sale.order.line", None)] = (
             999999999.0,
             {
                 "tax_id": FieldInfo(

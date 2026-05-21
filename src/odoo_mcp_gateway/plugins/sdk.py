@@ -334,23 +334,37 @@ def _extract_required_majors(specifier: SpecifierSet, raw: str) -> set[int]:
     """Inspect the SpecifierSet to figure out which major versions
     the plugin's range actually targets.
 
-    Heuristic — we look at the upper bound (``<X``, ``<=X``,
-    ``==X.*``) and the lower bound (``>=X``, ``>X``) to derive the
-    set of accepted major versions. If we can't parse a useful
-    bound, return empty (treat as "major-agnostic" → warn-and-load).
+    Walks each ``Specifier`` and derives the bounded major(s) from
+    its operator + version. ``>=X.y`` / ``>X.y`` contribute a lower
+    bound; ``<X.y`` / ``<=X.y`` contribute an upper bound; pinned
+    specifiers (``==X.y`` or ``==X.*``) contribute a single major.
+    Falls back to a bounded probe over majors [0..99] if no
+    bounds parse — that's safe (matches the prior behaviour) and
+    only fires on truly exotic specifier strings.
     """
-    majors: set[int] = set()
-    # We piggyback on packaging.Version by checking common boundary
-    # values in the range [0..99]. That's a wide net but
-    # avoids reimplementing the specifier algebra.
-    for candidate_major in range(0, 100):
-        candidate = Version(f"{candidate_major}.0.0")
-        if candidate in specifier:
-            majors.add(candidate_major)
-        else:
-            # If the next candidate is in but we're not, we'll catch
-            # it on the next loop iteration — no early exit, just
-            # let it walk through.
-            pass
-    del raw  # only used for logging if we add it later
-    return majors
+    del raw  # reserved for future logging
+    lower: int | None = None
+    upper: int | None = None
+    pinned: set[int] = set()
+    for spec in specifier:
+        try:
+            major = Version(spec.version).major
+        except InvalidVersion:
+            continue
+        op = spec.operator
+        if op in (">=", ">"):
+            lower = major if lower is None else min(lower, major)
+        elif op in ("<", "<="):
+            top = major if op == "<=" else major - 1
+            upper = top if upper is None else max(upper, top)
+        elif op in ("==", "==="):
+            pinned.add(major)
+    if pinned:
+        return pinned
+    if lower is None and upper is None:
+        # Fall back to the bounded-probe heuristic for exotic
+        # specifiers (e.g. ``!=`` only) where we can't derive bounds.
+        return {m for m in range(100) if Version(f"{m}.0.0") in specifier}
+    lo = lower if lower is not None else 0
+    hi = upper if upper is not None else 99
+    return {m for m in range(lo, hi + 1)}

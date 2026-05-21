@@ -172,7 +172,21 @@ class XmlRpcClient(OdooClientBase):
         self._uid: int | None = None
         self._password: Credential = Credential(None)
 
+    def _ensure_open_client(self) -> None:
+        """Re-instantiate ``self._client`` if it has been closed.
+
+        See the matching helper in :mod:`odoo_mcp_gateway.client.jsonrpc`
+        for the UAT v0.3.3 MED rationale. Symmetric guard so XML-RPC
+        callers benefit from the same recovery on a stale-closed client.
+        """
+        if self._owns_client and self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=self._timeout,
+            )
+
     async def _call(self, endpoint: str, method: str, params: list[Any]) -> Any:
+        self._ensure_open_client()
         body = _build_request(method, params)
         try:
             response = await self._client.post(

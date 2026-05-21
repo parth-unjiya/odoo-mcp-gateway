@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "odoo-mcp-gateway"
-version = "0.3.2"
+version = "0.3.3"
 description = "Security-first, version-agnostic MCP gateway for Odoo 17/18/19 — works with stock and custom modules via YAML configuration"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -60,12 +60,18 @@ dev = [
 # baseline OpenTelemetry API (full tracing exporter wiring lands in
 # Sprint 5). Without this extra the gateway logs via stdlib logging
 # and the /metrics route is omitted.
+# v0.3.3 LOW-1: extras carry upper-bound version caps so a major
+# release of an upstream library (e.g. structlog 26) cannot silently
+# break a deployment that pinned only ``odoo-mcp-gateway``. Runtime
+# dependencies (mcp, httpx, pydantic) remain open-ended because we
+# rely on them for wire-protocol compatibility and capping them would
+# risk locking out fixes; we revisit each cap as upstreams ship.
 observability = [
-    "prometheus-client>=0.20",
-    "structlog>=24.1",
-    "opentelemetry-api>=1.25",
-    "opentelemetry-sdk>=1.25",
-    "opentelemetry-instrumentation-httpx>=0.46b0",
+    "prometheus-client>=0.20,<1",
+    "structlog>=24.1,<27",
+    "opentelemetry-api>=1.25,<2",
+    "opentelemetry-sdk>=1.25,<2",
+    "opentelemetry-instrumentation-httpx>=0.46b0,<1",
 ]
 # OAuth 2.1 JWT bearer auth (ADR-005). Install with
 # ``pip install odoo-mcp-gateway[oauth]`` to enable IdP-issued JWT
@@ -73,7 +79,7 @@ observability = [
 # etc.). Without this extra the gateway falls back to its built-in
 # opaque-token verifier from Sprint 1.
 oauth = [
-    "authlib>=1.6",
+    "authlib>=1.6,<2",
 ]
 
 [project.entry-points."odoo_mcp_gateway.plugins"]

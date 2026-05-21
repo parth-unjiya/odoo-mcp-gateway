@@ -7,6 +7,14 @@ from typing import Any
 
 from .models import FieldInfo
 
+# Cache key is ``(model, session_key)``.  ``session_key`` is the
+# ContextVar-bound key of the calling MCP session (see
+# ``odoo_mcp_gateway.server._current_session_key``).  When no session
+# key is bound — stdio mode (single user per process) or unit tests —
+# the key is ``None`` and the cache behaves as a single per-process
+# entry, matching the pre-v0.3.3 behaviour.
+_CacheKey = tuple[str, str | None]
+
 # Internal / framework fields to always exclude from the "important" list.
 INTERNAL_FIELDS = frozenset(
     {
@@ -58,8 +66,12 @@ class FieldInspector:
     """Retrieves field definitions with TTL-based caching."""
 
     def __init__(self, cache_ttl: int = 3600) -> None:
-        # Cache maps model name -> (timestamp, field dict)
-        self._cache: dict[str, tuple[float, dict[str, FieldInfo]]] = {}
+        # Cache maps (model, session_key) -> (timestamp, field dict).
+        # v0.3.3 MED-1: cache is keyed by session in addition to model
+        # because Odoo's ``fields_get`` respects per-user ``groups=``
+        # field filtering, so an admin's cached schema must not be
+        # served to a portal user on a multi-tenant HTTP deployment.
+        self._cache: dict[_CacheKey, tuple[float, dict[str, FieldInfo]]] = {}
         self._cache_ttl = cache_ttl
 
     # ------------------------------------------------------------------
@@ -72,9 +84,17 @@ class FieldInspector:
         model: str,
         force_refresh: bool = False,
     ) -> dict[str, FieldInfo]:
-        """Return field definitions for *model*, using cache when valid."""
-        if not force_refresh and self._is_cache_valid(model):
-            return self._cache[model][1]
+        """Return field definitions for *model*, using cache when valid.
+
+        The cache is scoped by ``(model, session_key)`` where
+        ``session_key`` is read from the current ContextVar (see
+        :mod:`odoo_mcp_gateway.server`).  When no session key is bound
+        (stdio mode or unit tests) the key is ``None`` and behaves as a
+        single per-process entry — matching the pre-v0.3.3 behaviour.
+        """
+        cache_key = self._cache_key(model)
+        if not force_refresh and self._is_cache_valid(cache_key):
+            return self._cache[cache_key][1]
 
         raw: dict[str, dict[str, Any]] = await client.execute_kw(
             model,
@@ -111,7 +131,7 @@ class FieldInspector:
                 is_binary=fdata.get("type") == "binary",
             )
 
-        self._cache[model] = (time.monotonic(), fields)
+        self._cache[cache_key] = (time.monotonic(), fields)
         return fields
 
     def get_important_fields(
@@ -168,19 +188,41 @@ class FieldInspector:
         return deduped[:_MAX_IMPORTANT]
 
     def invalidate_cache(self, model: str | None = None) -> None:
-        """Invalidate cached fields for *model*, or all models if ``None``."""
+        """Invalidate cached fields for *model*, or all models if ``None``.
+
+        When *model* is given, **all** per-session entries for that
+        model are evicted, since invalidation typically follows a
+        schema change that affects every viewer.
+        """
         if model is None:
             self._cache.clear()
         else:
-            self._cache.pop(model, None)
+            stale = [key for key in self._cache if key[0] == model]
+            for key in stale:
+                self._cache.pop(key, None)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _is_cache_valid(self, model: str) -> bool:
-        """Return ``True`` if cached data for *model* has not expired."""
-        entry = self._cache.get(model)
+    def _cache_key(self, model: str) -> _CacheKey:
+        """Compose the per-session cache key for *model*.
+
+        Import is local to avoid a circular dependency between the
+        discovery layer and ``odoo_mcp_gateway.server``.
+        """
+        try:
+            from odoo_mcp_gateway.server import get_current_session_key
+
+            session_key = get_current_session_key()
+        except Exception:
+            # Defensive: never let cache keying break field discovery.
+            session_key = None
+        return (model, session_key)
+
+    def _is_cache_valid(self, cache_key: _CacheKey) -> bool:
+        """Return ``True`` if cached data for *cache_key* has not expired."""
+        entry = self._cache.get(cache_key)
         if entry is None:
             return False
         ts, _ = entry

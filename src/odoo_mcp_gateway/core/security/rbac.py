@@ -26,7 +26,7 @@ _PORTAL_GROUP_XML_IDS: frozenset[str] = frozenset(
 def is_portal_user(auth_result: AuthResult | None) -> bool:
     """Return ``True`` if the caller is a portal/external user.
 
-    Detection rule (defence-in-depth):
+    Detection rule (defence-in-depth — UPDATED for UAT v0.3.3 MED):
 
     1. Admins are never portal — short-circuit on ``is_admin``.
     2. Consult ``group_xml_ids`` first (stable across Odoo versions
@@ -35,11 +35,19 @@ def is_portal_user(auth_result: AuthResult | None) -> bool:
          (``base.group_portal``, ``base.group_public``) → portal.
        * If it contains any internal group → NOT portal.
     3. When ``group_xml_ids`` is empty, fall back to the
-       locale-dependent ``groups`` field with the same rule. This
-       branch matters during the transition window where some clients
-       send only ``groups`` (e.g. legacy fixtures, older auth helpers).
-    4. If BOTH collections are empty, the user genuinely has zero
-       groups assigned → portal by elimination.
+       locale-dependent ``groups`` field with the same rule. The
+       fallback REQUIRES at least one explicit portal-typed entry —
+       merely-empty / unmappable group lists no longer collapse to
+       "portal". (Earlier behaviour misclassified internal users
+       whose ``_fetch_groups`` failed silently during login as
+       portal, producing the puzzling
+       ``"Profile not available for portal users"`` error reported
+       in UAT v0.3.3 for a non-portal helpdesk_manager.)
+    4. BOTH collections empty → return ``False`` (cannot prove
+       portal membership; fail OPEN to the internal-user path so
+       legitimate users see the canonical
+       ``"No employee profile found"`` / ACL response instead of
+       a misleading portal hint).
 
     Returns ``False`` for unauthenticated callers — they have no
     authorisation surface at all, so RBAC tiering doesn't apply.
@@ -50,17 +58,25 @@ def is_portal_user(auth_result: AuthResult | None) -> bool:
         return False
     xml_ids = list(auth_result.group_xml_ids or [])
     if xml_ids:
+        # Strict subset: every entry must be a known portal group.
         return all(g in _PORTAL_GROUP_XML_IDS for g in xml_ids)
     # Fall back to ``groups`` (display names) when XML IDs aren't set.
-    # Same rule: non-empty + non-portal-only → internal.
     groups = list(auth_result.groups or [])
     if groups:
         # Display names like "base.group_user" sometimes appear in
         # ``groups`` too (auth_manager fills both for newer clients).
-        # We accept either spelling here for robustness.
+        # We accept either spelling here for robustness — BUT we now
+        # also require at least one entry to be a recognised portal
+        # group. A wholly-unmappable group list (all display names,
+        # none in the portal set) no longer flips to "portal".
+        if not any(g in _PORTAL_GROUP_XML_IDS for g in groups):
+            return False
         return all(g in _PORTAL_GROUP_XML_IDS for g in groups)
-    # Both empty → genuine portal/anonymous-ish user.
-    return True
+    # BOTH empty → genuine portal/anonymous-ish user CANNOT be proven.
+    # Previously returned True; that misclassified internal users whose
+    # group fetch failed silently. Return False so the calling code
+    # falls through to the no-employee-found / standard ACL path.
+    return False
 
 
 class RBACManager:
